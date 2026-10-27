@@ -56,6 +56,10 @@ struct Cli {
     /// File containing the pool's shared token.
     #[arg(long)]
     pool_token_file: PathBuf,
+    /// Seconds allowed for attaching a sandbox to the pool. Attaching hashes
+    /// every prepared file, Mathlib included, so it is CPU-bound.
+    #[arg(long, default_value_t = 300)]
+    pool_attach_timeout_secs: u64,
     /// Memory limit per sandbox.
     #[arg(long, default_value_t = 12 * 1024)]
     memory_mib: u64,
@@ -180,10 +184,11 @@ async fn main() -> Result<()> {
         idle_timeout: Duration::from_secs(60 * 60),
         max_attempts: 5,
     })?;
-    let beam_pool = PoolConfig {
-        endpoint: cli.pool_endpoint,
+    let beam_pool = PoolConfig::new(
+        cli.pool_endpoint,
         token,
-    };
+        Duration::from_secs(cli.pool_attach_timeout_secs),
+    );
     let harness = Arc::new(Harness {
         task,
         client,

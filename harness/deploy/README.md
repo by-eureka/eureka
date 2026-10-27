@@ -37,17 +37,27 @@ The sandboxes reach it as `tapis-gateway:9000`, and it forwards to the Tapis gat
 
 You need the pool's `BEAM_POOL_TOKEN` (the one given to `tapis.py up`, not the local pool's) in `.secrets/tapis-pool.token`, and the gateway host.
 `python3 lean-beam/deploy/beam-pool/tapis.py --env-file tapis.env status plan.json` prints the host; this needs a Tapis access token, but running the harness doesn't.
+The pods read that token from the Tapis secret `infinileantoken`. If you only have a Tapis access token, you can recover the pool token from the secret without printing it:
+
+    curl -sS -H "X-Tapis-Token: $(cat .secrets/TAPIS_TOKEN)" \
+        https://tacc.tapis.io/v3/pods/secrets/infinileantoken/value |
+      python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["secret_value"], end="")' \
+        > .secrets/tapis-pool.token
 
     scripts/connect-tapis.sh
-    API_KEY_FILE=/path/to/vista.key scripts/run-tapis.sh runs/problem runs/mine
+    BASE_URL=http://vista.tacc.utexas.edu:<port>/v1 API_KEY_FILE=/path/to/vista.key \
+        scripts/run-tapis.sh runs/problem runs/mine
 
 `connect-tapis.sh` starts the bridge and prints the pool's status; check that some workers are `"ready": true`.
-`run-tapis.sh` is `run.sh` with `--pool-endpoint tapis-gateway:9000`, the Tapis token, and the Vista endpoint and model as defaults.
+`run-tapis.sh` is `run.sh` with `--pool-endpoint tapis-gateway:9000`, the Tapis token, and the Vista model as defaults. `BASE_URL` is required, because the Vista port changes whenever the deployment restarts.
 Leave `RETRIEVAL` unset here; the supplied retrieval image is built for the local pool.
 
 The sandbox image has to contain exactly the same prepared project as the Tapis workers, because attaching compares every file, compiled Mathlib included.
+On an amd64 machine, `connect-tapis.sh` pulls the image the workers run (`debganguly/infinilean:0.0.1`, or `TAPIS_SOURCE_IMAGE`) and tags it as both `beam-pool:local` and `eureka-tapis:local`, with no local build.
+`scripts/tapis-snapshot-diff.py` reports no differing files for it. To switch images later, delete both tags and `pool-packages-tapis/`, then rerun.
+
 The workers run an amd64 image. Built on arm64, the same project has identical sources and `.olean` files, but 13 Lake `.trace` files record the platform and differ.
-So the first time it runs, `connect-tapis.sh` calls `build-tapis-image.sh`, which copies those files out of the Tapis image (`debganguly/infinilean:0.0.1`, without running it) onto `beam-pool:local`, checks that the result matches the snapshot exactly, and tags it `eureka-tapis:local`.
+So on arm64, the first time it runs, `connect-tapis.sh` calls `build-tapis-image.sh`, which copies those files out of the Tapis image (`debganguly/infinilean:0.0.1`, without running it) onto `beam-pool:local`, checks that the result matches the snapshot exactly, and tags it `eureka-tapis:local`.
 Its packages go to `pool-packages-tapis/`.
 Rerun `build-tapis-image.sh`, and delete `pool-packages-tapis/`, whenever the Tapis deployment changes image.
 

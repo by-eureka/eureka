@@ -13,6 +13,7 @@
 #   IMAGE                  sandbox image (default: beam-pool:local)
 #   POOL_ENDPOINT          pool gateway as the sandboxes see it (default: gateway:9000;
 #                          tapis-gateway:9000 for Tapis, see run-tapis.sh)
+#   ATTACH_TIMEOUT         seconds to attach each sandbox to the pool (default: 300)
 #   RETRIEVAL=1            add the tools from setup-retrieval.sh; defaults IMAGE to
 #                          eureka-agent:local (a custom IMAGE must include the retrieval client)
 #   LOGPROBS=false         explicitly allow missing token probabilities (default: require them)
@@ -47,6 +48,7 @@ args=(
     --template "$problem" --store "$run/store"
     --packages "$PACKAGES" --pool-token-file "$POOL_TOKEN_FILE"
     --pool-endpoint "${POOL_ENDPOINT:-gateway:9000}"
+    --pool-attach-timeout-secs "${ATTACH_TIMEOUT:-300}"
     --base-url "${BASE_URL:-https://api.deepseek.com}" --model "${MODEL:-deepseek-flash}"
     --max-turns "${MAX_TURNS:-200}" --max-output-tokens "${MAX_OUTPUT_TOKENS:-200000}"
     --dont-give-up --trace "$run/trace.jsonl" --capture-requests

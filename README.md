@@ -19,7 +19,7 @@ scripts/reverify.sh runs/problem path/to/candidate.lean runs/recheck
 scripts/stop-services.sh            # shut down the pool and retrieval
 ```
 
-To use the Beam pool on Tapis instead of a local one, put its token in `.secrets/tapis-pool.token` and replace `setup-pool.sh` and `run.sh` with `connect-tapis.sh` and `run-tapis.sh`. Those default to the model served on Vista. See [Using the pool on Tapis](harness/deploy/README.md#using-the-pool-on-tapis).
+To use the Beam pool on Tapis instead of a local one, put its token in `.secrets/tapis-pool.token` and replace `setup-pool.sh` and `run.sh` with `connect-tapis.sh` and `run-tapis.sh`. Those use the model served on Vista; set `BASE_URL` to its current endpoint. See [Using the pool on Tapis](harness/deploy/README.md#using-the-pool-on-tapis).
 
 The packages and pool token default to `pool-packages/` and `pool.token` in the repository root; set `PACKAGES` and `POOL_TOKEN_FILE` to use other paths.
 Each script explains its arguments at the top. The rest of this README covers the same steps by hand.
@@ -32,8 +32,8 @@ The files live under `store/pool-*/attempts/<id>/`. API authorization headers ar
 To rescore saved text with vLLM, use the full rendered prompt and answer:
 
 ```bash
-BASE_URL=http://vista.tacc.utexas.edu:60286/v1 MODEL=DeepSeek-V4.1-Flash \
-  API_KEY_FILE=.secrets/vista-60286-api.key \
+BASE_URL=http://vista.tacc.utexas.edu:<port>/v1 MODEL=DeepSeek-V4.1-Flash \
+  API_KEY_FILE=.secrets/vista.key \
   python3 scripts/score-logprobs.py rendered.txt --output scores.json
 ```
 
@@ -80,11 +80,12 @@ Then read through `Challenge.lean` carefully. Those statements are exactly what 
 
 ## Running
 
-Set the endpoint and model. On Vista, use your deployment's URL; the port can change.
+Set the endpoint and model. On Vista, use the current deployment's URL and key; the port
+changes whenever the deployment restarts, so the scripts have no default for it.
 The API key is read from the terminal so it stays out of your shell history:
 
 ```bash
-BASE_URL=http://vista.tacc.utexas.edu:60286/v1
+BASE_URL=http://vista.tacc.utexas.edu:<port>/v1
 MODEL=DeepSeek-V4.1-Flash
 read -rsp 'API key: ' DEEPSEEK_API_KEY
 echo
