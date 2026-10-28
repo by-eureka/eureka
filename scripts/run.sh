@@ -7,6 +7,7 @@
 #   BASE_URL, MODEL        endpoint and model (default: DeepSeek's API, deepseek-flash)
 #   DEEPSEEK_API_KEY       prompted for if neither it nor OPENAI_API_KEY is set
 #   API_KEY_FILE           read the API key from this file instead
+#   NO_BEARER_AUTH=true    do not prompt for/send bearer auth; use custom headers instead
 #   MAX_TURNS              default 200
 #   MAX_OUTPUT_TOKENS      default 200000, reasoning included; input plus output
 #                          must fit the server's context window
@@ -35,13 +36,15 @@ if [ -e "$run" ]; then
     exit 1
 fi
 
-if [ -n "${API_KEY_FILE:-}" ]; then
-    DEEPSEEK_API_KEY=$(cat "$API_KEY_FILE")
-    export DEEPSEEK_API_KEY
-elif [ -z "${DEEPSEEK_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
-    read -rsp 'API key: ' DEEPSEEK_API_KEY
-    echo
-    export DEEPSEEK_API_KEY
+if [ "${NO_BEARER_AUTH:-false}" != true ]; then
+    if [ -n "${API_KEY_FILE:-}" ]; then
+        DEEPSEEK_API_KEY=$(cat "$API_KEY_FILE")
+        export DEEPSEEK_API_KEY
+    elif [ -z "${DEEPSEEK_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+        read -rsp 'API key: ' DEEPSEEK_API_KEY
+        echo
+        export DEEPSEEK_API_KEY
+    fi
 fi
 
 args=(
@@ -55,6 +58,9 @@ args=(
     "--logprobs=${LOGPROBS:-true}"
     --comparator "$ROOT/comparator" --beam-skill "$ROOT/lean-beam/skills/lean-beam"
 )
+if [ "${NO_BEARER_AUTH:-false}" = true ]; then
+    args+=(--no-bearer-auth)
+fi
 if [ "${RETRIEVAL:-0}" = 1 ]; then
     args+=(--image "${IMAGE:-eureka-agent:local}" --mcp "$ROOT/tools/retrieval/mcp.json")
 else

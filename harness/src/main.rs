@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use harness::agent::AgentConfig;
 use harness::pool::PoolConfig;
-use harness::responses::{Client, ModelConfig};
+use harness::responses::{Client, ModelConfig, headers_from_env};
 use harness::sandbox::SandboxSpec;
 use harness::search::Harness;
 use harness::{prompt, trace, verify};
@@ -70,6 +70,13 @@ struct Cli {
     base_url: String,
     #[arg(long, default_value = "deepseek-flash")]
     model: String,
+    /// Do not send an Authorization: Bearer header to the model provider.
+    #[arg(long)]
+    no_bearer_auth: bool,
+    /// Add a model-provider header whose value is read from an environment variable.
+    /// Repeat as needed, e.g. --header-env X-Tapis-Token=TAPIS_TOKEN.
+    #[arg(long = "header-env", value_name = "HEADER=ENV_VAR")]
+    header_env: Vec<String>,
     /// Reasoning effort: low, high, max.
     #[arg(long, default_value = "high")]
     effort: String,
@@ -165,9 +172,14 @@ async fn main() -> Result<()> {
     anyhow::ensure!(cli.agents > 0, "--agents must be positive");
     // A seed only sets the starting file; the conversation starts fresh.
     let seed = cli.seed.as_ref().map(std::fs::read_to_string).transpose()?;
-    let api_key = std::env::var("DEEPSEEK_API_KEY")
-        .or_else(|_| std::env::var("OPENAI_API_KEY"))
-        .context("set DEEPSEEK_API_KEY or OPENAI_API_KEY")?;
+    let api_key = if cli.no_bearer_auth {
+        String::new()
+    } else {
+        std::env::var("DEEPSEEK_API_KEY")
+            .or_else(|_| std::env::var("OPENAI_API_KEY"))
+            .context("set DEEPSEEK_API_KEY or OPENAI_API_KEY, or pass --no-bearer-auth")?
+    };
+    let provider_headers = headers_from_env(&cli.header_env)?;
     let token = std::fs::read_to_string(&cli.pool_token_file)
         .with_context(|| format!("read {}", cli.pool_token_file.display()))?
         .trim()
