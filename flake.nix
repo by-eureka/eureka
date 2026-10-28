@@ -44,11 +44,24 @@
             );
         };
 
-        runtimeSource = pkgs.runCommand "eureka-runtime-source" { } ''
+        runtimeSource = pkgs.runCommand "eureka-runtime-source" {
+          nativeBuildInputs = [ pkgs.patch ];
+        } ''
+          test -f ${cleanEurekaSource}/comparator/lakefile.toml || {
+            echo "Eureka source is missing Comparator submodule contents; fetch the flake with submodules enabled." >&2
+            exit 1
+          }
+          test -f ${cleanEurekaSource}/lean-beam/lakefile.lean || {
+            echo "Eureka source is missing lean-beam submodule contents; fetch the flake with submodules enabled." >&2
+            exit 1
+          }
+
           mkdir -p "$out/share/eureka"
           cp -R ${cleanEurekaSource}/harness "$out/share/eureka/harness"
           cp -R ${cleanEurekaSource}/worktrees "$out/share/eureka/worktrees"
           cp -R ${cleanEurekaSource}/comparator "$out/share/eureka/comparator"
+          chmod -R u+w "$out/share/eureka/comparator"
+          patch -d "$out/share/eureka/comparator" -p1 < ${./patches/comparator-landrun-child-git.patch}
           cp -R ${cleanEurekaSource}/lean-beam "$out/share/eureka/lean-beam"
           mkdir -p "$out/share/eureka/examples"
           cp -R ${cleanEurekaSource}/examples/simple "$out/share/eureka/examples/simple"
