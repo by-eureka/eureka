@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Re-check a saved candidate with Comparator, without a model. Publishes it if it passes.
+# Re-check a saved candidate with Lean’s bundled verifier, without a model. Publishes it if it passes.
 #
 #   scripts/reverify.sh runs/problem runs/mine/store/pool-*/attempts/<id>/candidate.lean runs/recheck
 #
@@ -24,5 +24,4 @@ fi
 mkdir -p "$out/store"
 "$HARNESS" --template "$problem" --store "$out/store" \
     --packages "$PACKAGES" --pool-token-file "$POOL_TOKEN_FILE" \
-    --comparator "$ROOT/comparator" \
     --trace "$out/trace.jsonl" --verify-only "$candidate"

@@ -1,5 +1,5 @@
-//! CLI entry point. Run it from the repository root: the `--comparator` and
-//! `--beam-skill` defaults are relative paths.
+//! CLI entry point. Run it from the repository root: the `--beam-skill`
+//! default is a relative path.
 //!
 //! Exits 0 when a proof is verified and published, 2 when every lead stopped
 //! without one, and 1 on any other error.
@@ -38,9 +38,6 @@ struct Cli {
     /// Number of independent top-level agents.
     #[arg(short = 'n', long, default_value_t = 1)]
     agents: usize,
-    /// Comparator checkout with built binaries.
-    #[arg(long, default_value = "comparator")]
-    comparator: PathBuf,
     /// The pool image's prepared `.lake/packages`, extracted to the host.
     #[arg(long)]
     packages: PathBuf,
@@ -118,11 +115,11 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    // Catch bad paths, missing Comparator binaries and unknown theorem names
+    // Catch bad paths, unsupported Lean versions and invalid verification configuration
     // before spending anything on the model.
     let template = std::fs::canonicalize(&cli.template)?;
     let packages = std::fs::canonicalize(&cli.packages)?;
-    let mut verifier = verify::Comparator::from_checkout(&cli.comparator, &template)?;
+    let mut verifier = verify::LeanVerifier::from_template(&template)?;
     verifier.deps = Some(packages.clone());
     let mut options = Options::default();
     // Beam keeps per-attempt session state in .beam; it isn't part of the project.

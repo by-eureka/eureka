@@ -7,7 +7,7 @@ In development.
 The `scripts/` directory wraps the steps below. From the repository root:
 
 ```bash
-scripts/build.sh                    # Comparator and the harness
+scripts/build.sh                    # Rust harness
 scripts/setup-pool.sh               # Beam image, packages, token, pool (WORKERS=4)
 scripts/setup-retrieval.sh          # optional: Loogle and lemma search
 scripts/new-problem.sh /path/to/Problem.lean runs/problem MyProblem.main_theorem
@@ -51,14 +51,13 @@ Each compaction saves its history, proof snapshot and summary under the attempt 
 
 ## Setup
 
-You need Linux, Docker, Rust 1.91+, Python 3.10+, and Lean (installed with elan).
-Clone with `--recurse-submodules`, then set up the [Beam pool](harness/deploy/README.md) and [Comparator](comparator/README.md).
-Comparator also needs `landrun` and a working systemd user session.
+You need Linux, Docker, Rust 1.91+, Python 3.10+, and Lean 4.35+ (installed with elan).
+Clone with `--recurse-submodules`, then set up the [Beam pool](harness/deploy/README.md) for the selected toolchain.
+Verification uses the toolchain’s bundled `lake comparator` and needs `bwrap` (Bubblewrap) and a working systemd user session. There is no separate verifier checkout or exporter to build.
 
-Build Comparator and the harness from the repository root:
+Build the harness from the repository root:
 
 ```bash
-(cd comparator && lake build lean4export comparator)
 cargo build --locked --manifest-path harness/Cargo.toml
 ```
 
@@ -128,4 +127,4 @@ The live dashboard needs Rich: `python3 -m pip install -r harness/requirements.t
 Pass several run directories to `scripts/watch.sh` to see them together. Ctrl-C closes only the monitor.
 For a snapshot or JSON, use `python3 harness/trace_report.py "$RUN/trace.jsonl"` with optional `--json`.
 A long model response can leave the trace quiet for a while until it finishes.
-In the status column, `verified` means Comparator accepted the proof, `finished` means a helper handed its work back to the lead, and `not_submitted` means the agent stopped without submitting anything.
+In the status column, `verified` means Lean’s bundled verifier accepted the proof, `finished` means a helper handed its work back to the lead, and `not_submitted` means the agent stopped without submitting anything.

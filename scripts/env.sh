@@ -4,12 +4,12 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PACKAGES=${PACKAGES:-$ROOT/pool-packages}
 POOL_TOKEN_FILE=${POOL_TOKEN_FILE:-$ROOT/pool.token}
 HARNESS=$ROOT/harness/target/debug/harness
-# User services skip shell startup files. Comparator needs elan's lake and landrun.
+# User services skip shell startup files. Verification needs elan's Lake and Bubblewrap.
 export PATH="${ELAN_HOME:-$HOME/.elan}/bin:$HOME/.local/bin:$PATH"
 
 need_harness() {
     [ -x "$HARNESS" ] || { echo "$HARNESS not found; run scripts/build.sh first" >&2; exit 1; }
-    for tool in lake landrun systemd-run; do
+    for tool in lake bwrap systemd-run; do
         command -v "$tool" >/dev/null || { echo "$tool not found in PATH" >&2; exit 1; }
     done
 }

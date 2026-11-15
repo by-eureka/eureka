@@ -1,105 +1,191 @@
-//! Comparator as a `worktrees::Verifier`, run exactly as its README requires:
-//! `landrun` for the build/export sandbox plus `systemd-run --user` with
-//! `RestrictAddressFamilies=~AF_UNIX` (needed because this kernel's Landlock
-//! cannot scope UNIX sockets).
+//! Independent verification through Lean 4.35+'s bundled `lake comparator`.
 //!
-//! worktrees hands us a fresh copy of the trusted template with the candidate
-//! as the only changed file, so nothing from the agent's workspace or build
-//! outputs is used. Build Comparator first with `lake build lean4export
-//! comparator` in its checkout.
+//! The trusted template selects the exact compiler, exporter and kernel checker.
+//! Lake owns the Bubblewrap sandbox; systemd bounds the entire process tree.
+//! Only the candidate source is copied into the fresh verification workspace.
 
 use anyhow::Context;
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 use worktrees::{Verification, Verifier, VerifyError};
 
-pub struct Comparator {
-    pub comparator: PathBuf,
-    pub lean4export: PathBuf,
-    pub policy: String,
+pub struct LeanVerifier {
+    lake: PathBuf,
+    policy: String,
+    solution_module: String,
     pub timeout: Duration,
-    /// Prebuilt `.lake/packages` linked into the fresh verification root.
+    /// Trusted prebuilt dependencies, mounted read-only inside the fresh root.
     pub deps: Option<PathBuf>,
 }
 
-impl Comparator {
-    /// Locate the binaries in a Comparator checkout and derive a policy ID from
-    /// its git revision and the template's toolchain and config.
-    pub fn from_checkout(dir: &Path, template: &Path) -> anyhow::Result<Self> {
-        // Verification runs with another working directory; paths must be absolute.
-        let dir = &std::fs::canonicalize(dir)?;
-        let comparator = dir.join(".lake/build/bin/comparator");
-        let lean4export = dir.join(".lake/packages/lean4export/.lake/build/bin/lean4export");
-        for bin in [&comparator, &lean4export] {
-            if !bin.is_file() {
-                anyhow::bail!(
-                    "missing {} (run `lake build lean4export comparator`)",
-                    bin.display()
-                );
-            }
-        }
-        let rev = Command::new("git")
-            .args(["-C", &dir.to_string_lossy(), "rev-parse", "HEAD"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-            .unwrap_or_else(|| "unknown".into());
-        let toolchain =
-            std::fs::read_to_string(template.join("lean-toolchain")).unwrap_or_default();
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Config {
+    challenge_module: String,
+    solution_module: String,
+    theorem_names: Vec<String>,
+    #[serde(default)]
+    definition_names: Vec<String>,
+    permitted_axioms: Vec<String>,
+    #[serde(default)]
+    external_kernels: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+fn validate_config(template: &Path, text: &str) -> anyhow::Result<Config> {
+    let config: Config = serde_json::from_str(text).context("invalid verification config.json")?;
+    anyhow::ensure!(
+        !config.theorem_names.is_empty() || !config.definition_names.is_empty(),
+        "config.json must name at least one theorem or definition"
+    );
+    for name in config
+        .theorem_names
+        .iter()
+        .chain(&config.definition_names)
+        .chain(&config.permitted_axioms)
+    {
+        anyhow::ensure!(
+            !name.trim().is_empty(),
+            "empty declaration name in config.json"
+        );
+    }
+    anyhow::ensure!(
+        config.challenge_module != config.solution_module,
+        "challenge_module and solution_module must differ"
+    );
+    for module in [&config.challenge_module, &config.solution_module] {
+        anyhow::ensure!(
+            !module.contains(['/', '\\']) && module.split('.').all(|p| !p.is_empty()),
+            "invalid module path: {module}"
+        );
+        let path = template.join(module.replace('.', "/") + ".lean");
+        anyhow::ensure!(path.is_file(), "missing module {}", path.display());
+    }
+    for command in config.external_kernels.values() {
+        anyhow::ensure!(
+            !command.is_empty() && !command[0].is_empty(),
+            "external kernel command must not be empty"
+        );
+    }
+    Ok(config)
+}
+
+fn supported_version(version: &str) -> bool {
+    let Some(number) = version.split("version ").nth(1) else {
+        return false;
+    };
+    let mut parts = number.split('.');
+    parts.next() == Some("4")
+        && parts
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+            .is_some_and(|minor| minor >= 35)
+}
+
+impl LeanVerifier {
+    pub fn from_template(template: &Path) -> anyhow::Result<Self> {
+        let toolchain = std::fs::read_to_string(template.join("lean-toolchain"))?;
+        let toolchain = toolchain.trim();
+        anyhow::ensure!(!toolchain.is_empty(), "empty lean-toolchain");
         let config = std::fs::read_to_string(template.join("config.json"))?;
-        check_theorem_names(template, &config)?;
+        let parsed = validate_config(template, &config)?;
+        anyhow::ensure!(
+            template.join("lake-manifest.json").is_file(),
+            "missing lake-manifest.json; prepare the trusted template first"
+        );
+        // Resolve once: verification must not follow a changed default toolchain.
+        let resolved = Command::new("elan")
+            .args(["which", "lake"])
+            .env("ELAN_TOOLCHAIN", toolchain)
+            .current_dir(template)
+            .output()
+            .context("resolve template's Lake with elan")?;
+        anyhow::ensure!(
+            resolved.status.success(),
+            "cannot resolve {toolchain}: {}",
+            String::from_utf8_lossy(&resolved.stderr)
+        );
+        let lake = PathBuf::from(String::from_utf8(resolved.stdout)?.trim());
+        let bin = lake.parent().context("Lake has no parent directory")?;
+        let version = Command::new(bin.join("lean")).arg("--version").output()?;
+        let version_text = String::from_utf8(version.stdout)?;
+        anyhow::ensure!(
+            version.status.success() && supported_version(&version_text),
+            "verification requires Lean 4.35 or newer; {toolchain}: {version_text}"
+        );
+        for name in ["leanexport", "leanchecker"] {
+            anyhow::ensure!(bin.join(name).is_file(), "{toolchain} lacks bundled {name}");
+        }
+        let canonical_config: serde_json::Value = serde_json::from_str(&config)?;
         let policy = format!(
-            "comparator:{rev};toolchain:{};config:{}",
-            toolchain.trim(),
-            config.split_whitespace().collect::<String>()
+            "lake-comparator-v1;toolchain:{toolchain};compiler:{};config:{canonical_config}",
+            version_text.trim()
         );
         Ok(Self {
-            comparator,
-            lean4export,
+            lake,
             policy,
+            solution_module: parsed.solution_module,
             timeout: Duration::from_secs(1800),
             deps: None,
         })
     }
 }
 
-impl Verifier for Comparator {
+impl Verifier for LeanVerifier {
     fn policy_id(&self) -> &str {
         &self.policy
     }
 
     fn verify(&self, input: &Verification<'_>) -> Result<String, VerifyError> {
-        if let Some(deps) = &self.deps {
-            crate::deps::link(input.root(), deps)
-                .map_err(|e| VerifyError::Operational(std::io::Error::other(e.to_string())))?;
-        }
         let path = std::env::var("PATH").unwrap_or_default();
-        // Run as a transient unit so RuntimeMaxSec kills the whole process tree.
-        // The unit doesn't inherit our environment, hence the explicit PATH.
-        let output = Command::new("systemd-run")
+        let mut command = Command::new("systemd-run");
+        command
             .args(["--user", "--wait", "--pipe", "--quiet", "--collect"])
-            .arg("--property=RestrictAddressFamilies=~AF_UNIX")
             .arg(format!(
                 "--property=RuntimeMaxSec={}",
                 self.timeout.as_secs()
             ))
             .arg(format!("-EPATH={path}"))
-            .arg(format!(
-                "-ECOMPARATOR_LEAN4EXPORT={}",
-                self.lean4export.display()
-            ))
             .arg("--working-directory")
             .arg(input.root())
-            .args(["--", "lake", "env"])
-            .arg(&self.comparator)
-            .arg("config.json")
+            .arg("--");
+        if let Some(deps) = &self.deps {
+            // A symlink into /home or /tmp becomes inaccessible when Lake covers
+            // those directories. A read-only mount survives the nested sandbox
+            // and prevents the candidate from changing shared build artifacts.
+            let packages = input.root().join(".lake/packages");
+            std::fs::create_dir_all(&packages)?;
+            command
+                .args([
+                    "bwrap",
+                    "--die-with-parent",
+                    "--bind",
+                    "/",
+                    "/",
+                    "--dev-bind",
+                    "/dev",
+                    "/dev",
+                    "--ro-bind",
+                ])
+                .arg(deps)
+                .arg(packages)
+                .arg("--");
+        }
+        let output = command
+            .arg(&self.lake)
+            .args(["comparator", "--config", "config.json"])
             .output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         let report = tail(&format!("{stdout}\n{stderr}"), 1024 * 1024 - 1024);
-        classify(output.status.success(), &stdout, &stderr, report)
+        classify(
+            output.status.success(),
+            &stdout,
+            &stderr,
+            report,
+            &self.solution_module,
+        )
     }
 }
 
@@ -111,6 +197,7 @@ fn classify(
     stdout: &str,
     stderr: &str,
     report: String,
+    solution_module: &str,
 ) -> Result<String, VerifyError> {
     if success && stdout.contains("Your solution is okay!") {
         return Ok(report);
@@ -133,7 +220,7 @@ fn classify(
     let solution_build_error = stdout
         .lines()
         .rfind(|line| line.starts_with("Building ") || line.starts_with("Exporting "))
-        .is_some_and(|line| line.starts_with("Building ") && line.contains("Solution"))
+        .is_some_and(|line| line == format!("Building {solution_module}"))
         && text.contains(".lean:")
         && text.contains("error:");
     if !text.contains("PANIC") && (rejection || solution_build_error) {
@@ -141,61 +228,6 @@ fn classify(
     } else {
         Err(VerifyError::Operational(std::io::Error::other(report)))
     }
-}
-
-/// Every name in `theorem_names` must be a theorem the challenge declares,
-/// fully qualified. lean4export panics on a missing constant, after the agents
-/// have done all their work, so check up front.
-fn check_theorem_names(template: &Path, config: &str) -> anyhow::Result<()> {
-    let config: serde_json::Value = serde_json::from_str(config)?;
-    let module = config["challenge_module"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("config.json: challenge_module missing"))?;
-    let path = template.join(module.replace('.', "/") + ".lean");
-    let source = std::fs::read_to_string(&path)
-        .with_context(|| format!("read challenge {}", path.display()))?;
-    let declared = declared_theorems(&source);
-    for name in config["theorem_names"].as_array().into_iter().flatten() {
-        let name = name.as_str().unwrap_or_default();
-        if !declared.iter().any(|d| d == name) {
-            anyhow::bail!(
-                "config.json names theorem `{name}`, but {} declares: {}",
-                path.display(),
-                declared.join(", ")
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Fully qualified names of the theorems in a Lean source, following
-/// `namespace`/`end` nesting.
-/// A line scan, good enough to catch typos in config.json. It misses theorems
-/// with anything in front of the keyword, such as `private theorem`.
-fn declared_theorems(source: &str) -> Vec<String> {
-    let mut namespaces: Vec<&str> = Vec::new();
-    let mut names = Vec::new();
-    for line in source.lines() {
-        let mut words = line.split_whitespace();
-        match (words.next(), words.next()) {
-            (Some("namespace"), Some(ns)) => namespaces.push(ns),
-            (Some("end"), Some(ns)) if namespaces.last() == Some(&ns) => {
-                namespaces.pop();
-            }
-            (Some("theorem" | "lemma"), Some(name)) => {
-                // Lean permits `theorem t:` and `lemma t(n : Nat)` without a space.
-                let name = name.split([':', '(', '{', '[']).next().unwrap_or(name);
-                let prefix = namespaces.join(".");
-                names.push(if prefix.is_empty() {
-                    name.to_owned()
-                } else {
-                    format!("{prefix}.{name}")
-                });
-            }
-            _ => {}
-        }
-    }
-    names
 }
 
 // worktrees caps reports at 1 MiB. Keep the end, which is where the verdict is.
@@ -211,55 +243,58 @@ fn tail(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    fn classify(
+        success: bool,
+        stdout: &str,
+        stderr: &str,
+        report: String,
+    ) -> Result<String, VerifyError> {
+        super::classify(success, stdout, stderr, report, "Proofs.Solution")
+    }
+
+    #[test]
+    fn minimum_toolchain() {
+        for text in ["Lean (version 4.35.0, x)", "Lean (version 4.36.0-rc2, x)"] {
+            assert!(supported_version(text));
+        }
+        for text in [
+            "Lean (version 4.34.1, x)",
+            "Lean (version 3.51.0, x)",
+            "garbage",
+        ] {
+            assert!(!supported_version(text));
+        }
+    }
+
     #[test]
     fn failures_require_proof_rejection_evidence() {
-        assert!(matches!(
-            classify(false, "", "Child exited with 139", "crash".into()),
-            Err(VerifyError::Operational(_))
-        ));
-        assert!(matches!(
-            classify(
-                false,
-                "Building Proofs.Solution\nerror: Proofs/Solution.lean:4:2: unsolved goals",
-                "Child exited with 1",
-                "build".into()
-            ),
-            Err(VerifyError::Rejected(_))
-        ));
-        assert!(matches!(
-            classify(false, "", "Illegal axiom detected: sorryAx", "sorry".into()),
-            Err(VerifyError::Rejected(_))
-        ));
-        assert!(matches!(
-            classify(false, "", "Failed to connect to bus", "bus".into()),
-            Err(VerifyError::Operational(_))
-        ));
+        for text in [
+            "Child exited with 139",
+            "Failed to connect to bus",
+            "error: bwrap: setting up uid map: Permission denied",
+            "error: malformed configuration",
+        ] {
+            assert!(matches!(
+                classify(false, "", text, text.into()),
+                Err(VerifyError::Operational(_))
+            ));
+        }
+        for text in [
+            "Illegal axiom detected: sorryAx",
+            "theorem statement do not match",
+            "Const not found in solution",
+            "Lean default kernel rejects the solution",
+        ] {
+            assert!(matches!(
+                classify(false, "", text, text.into()),
+                Err(VerifyError::Rejected(_))
+            ));
+        }
         assert!(classify(true, "Your solution is okay!", "", "ok".into()).is_ok());
-        assert!(classify(true, "", "", "missing sentinel".into()).is_err());
-    }
-
-    #[test]
-    fn theorems_are_qualified_by_namespace() {
-        let src = "import Mathlib\nnamespace TriangleGame\ndef x := 1\ntheorem main_theorem : True := by\n  sorry\nend TriangleGame\nlemma top : True := trivial\n";
-        assert_eq!(declared_theorems(src), ["TriangleGame.main_theorem", "top"]);
-    }
-
-    #[test]
-    fn theorem_names_stop_before_attached_punctuation() {
-        let src = "theorem putnam_1993_b5:\n  True := by trivial\n\
-                   namespace N\nlemma direct:True := by trivial\n\
-                   theorem bound(n : Nat) : n = n := rfl\n\
-                   theorem implicit{n : Nat} : n = n := rfl\n\
-                   theorem instance[T : Type] : True := by trivial\nend N\n";
-        assert_eq!(
-            declared_theorems(src),
-            [
-                "putnam_1993_b5",
-                "N.direct",
-                "N.bound",
-                "N.implicit",
-                "N.instance",
-            ]
-        );
+        assert!(classify(true, "", "", "missing verdict".into()).is_err());
+        assert!(matches!(
+            classify(false, "", "PANIC Illegal axiom detected", "panic".into()),
+            Err(VerifyError::Operational(_))
+        ));
     }
 }

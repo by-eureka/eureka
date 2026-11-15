@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local integration tests: real sandboxes/Beam/Comparator, scripted model responses.
+"""Local integration tests: real sandboxes/Beam/Lake verifier, scripted model responses.
 No model provider, API keys, or paid requests are used.
 
 Build the harness, start the Beam pool, then from the repository root:
@@ -90,7 +90,7 @@ class Lifecycle(unittest.TestCase):
         self.thread.start()
         self.args = [str(ROOT/'harness/target/debug/harness'), '--template', str(ROOT/'examples/simple'),
                      '--store', str(self.dir), '--packages', os.environ['HARNESS_PACKAGES'],
-                     '--pool-token-file', os.environ['HARNESS_POOL_TOKEN_FILE'], '--comparator', str(ROOT/'comparator'),
+                     '--pool-token-file', os.environ['HARNESS_POOL_TOKEN_FILE'],
                      '--beam-skill', str(ROOT/'lean-beam/skills/lean-beam'), '--trace', str(self.dir/'trace.jsonl'),
                      '--base-url', f'http://127.0.0.1:{self.server.server_port}', '--max-turns', '12', '--logprobs=false']
 
@@ -256,7 +256,7 @@ class Lifecycle(unittest.TestCase):
         self.assertTrue(Path(row['candidate']).is_file())
 
     def test_long_lived_agent_compacts_twenty_times_and_does_not_give_up(self):
-        # Real HTTP, filesystem snapshots, sandbox and final Comparator check.
+        # Real HTTP, filesystem snapshots, sandbox and final Lake verifier check.
         # Summaries do not reset the lifetime turn budget, file or tool state.
         normal, summaries, overflow = 0, 0, False
         original = None

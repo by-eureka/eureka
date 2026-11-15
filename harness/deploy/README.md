@@ -61,7 +61,7 @@ So on arm64, the first time it runs, `connect-tapis.sh` calls `build-tapis-image
 Its packages go to `pool-packages-tapis/`.
 Rerun `build-tapis-image.sh`, and delete `pool-packages-tapis/`, whenever the Tapis deployment changes image.
 
-Comparator still runs on this machine, so verification doesn't depend on Tapis.
+Lean verifier still runs on this machine, so verification doesn't depend on Tapis.
 
 ## Running, stopping, and recovery
 
@@ -83,7 +83,7 @@ Each attempt saves its files under `<pool>/attempts/<id>/`, which no sandbox can
 
 To continue from a saved file, start a new run with the same template and `--seed /path/to/candidate.lean`.
 This restores the file, not the conversation.
-To re-check a saved file without a model, run with `--verify-only /path/to/candidate.lean` and the usual template, store, packages and Comparator arguments.
+To re-check a saved file without a model, run with `--verify-only /path/to/candidate.lean` and the usual template, store, packages arguments.
 Either way the harness creates a new pool and leaves the old one alone.
 
 Capture is on by default. Each attempt saves `request-NNNN.json`, `response-NNNN.json` and `stream-NNNN.jsonl` (never authorization headers).
@@ -109,7 +109,7 @@ For local Loogle and hosted lemma search, see the [retrieval tools](../../tools/
 
 ## Integration tests
 
-These use real Docker, Beam and Comparator with scripted model responses, so no provider is called.
+These use real Docker, Beam and Lean verifier with scripted model responses, so no provider is called.
 Build the harness first, then run:
 
     HARNESS_PACKAGES=/path/to/pool-packages \

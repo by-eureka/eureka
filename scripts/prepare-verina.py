@@ -112,8 +112,7 @@ def prepare(reference, output):
         supplied_axioms = re.findall(r'^\s*axiom\s+([^\s({:]+)', text, re.M)
         config = {'challenge_module': 'Proofs.Challenge', 'solution_module': 'Proofs.Solution',
                   'theorem_names': [name], 'permitted_axioms': [
-                      'propext', 'Quot.sound', 'Classical.choice', *supplied_axioms],
-                  'enable_nanoda': False}
+                      'propext', 'Quot.sound', 'Classical.choice', *supplied_axioms]}
         (template / 'config.json').write_text(json.dumps(config, indent=2) + '\n')
         description = (directory / task['description_file']).read_text().strip()
         prompt = ('Prove the correctness theorem in Proofs/Solution.lean. The supplied program, '

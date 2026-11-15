@@ -53,7 +53,7 @@ args=(
     --max-turns "${MAX_TURNS:-200}" --max-output-tokens "${MAX_OUTPUT_TOKENS:-200000}"
     --dont-give-up --trace "$run/trace.jsonl" --capture-requests
     "--logprobs=${LOGPROBS:-true}"
-    --comparator "$ROOT/comparator" --beam-skill "$ROOT/lean-beam/skills/lean-beam"
+    --beam-skill "$ROOT/lean-beam/skills/lean-beam"
 )
 if [ "${RETRIEVAL:-0}" = 1 ]; then
     args+=(--image "${IMAGE:-eureka-agent:local}" --mcp "$ROOT/tools/retrieval/mcp.json")
