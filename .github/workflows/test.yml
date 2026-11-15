@@ -1,0 +1,58 @@
+name: tests
+on:
+  pull_request:
+  push:
+    branches: [main, 'upgrade/**']
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --manifest-path harness/Cargo.toml --check
+      - run: cargo test --locked --manifest-path harness/Cargo.toml --lib --test responses
+      - run: cargo test --locked --manifest-path worktrees/Cargo.toml
+      - run: python3 -m unittest discover -s harness/tests -p 'test_*.py'
+  native-beam:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        lean: [v4.35.0, v4.36.0-rc2]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Lean and Bubblewrap
+        env:
+          TOOLCHAIN: leanprover/lean4:${{ matrix.lean }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap cmake libgmp-dev
+          curl --fail --location https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o /tmp/elan-init.sh
+          sh /tmp/elan-init.sh -y --default-toolchain "$TOOLCHAIN"
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Build the pinned Beam for this compiler
+        env:
+          TOOLCHAIN: leanprover/lean4:${{ matrix.lean }}
+        run: |
+          lean_bin=$(ELAN_TOOLCHAIN="$TOOLCHAIN" elan which lean)
+          lean_prefix=$(dirname "$(dirname "$lean_bin")")
+          cmake -DLEAN_PREFIX="$lean_prefix" -P lean-beam/scripts/build-toolchain.cmake
+          # RC SDKs already contain Beam; replace only its contribution on this disposable runner.
+          chmod -R u+w "$lean_prefix/bin" "$lean_prefix/lib/lean-beam" 2>/dev/null || true
+          cmake -DLEAN_PREFIX="$lean_prefix" -DPREFIX="$lean_prefix" -P lean-beam/scripts/install-toolchain.cmake
+          echo "HARNESS_BEAM_MCP=$lean_prefix/bin/lean-beam-mcp" >> "$GITHUB_ENV"
+      - name: Exercise MCP and the bundled verifier
+        env:
+          HARNESS_LEAN_TOOLCHAIN: leanprover/lean4:${{ matrix.lean }}
+        run: |
+          # Ubuntu restricts unprivileged user namespaces for unknown executables.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          systemd-run --user --wait --pipe --quiet true
+          cargo test --locked --manifest-path harness/Cargo.toml --test beam_surface --test lake_verifier -- --ignored --nocapture

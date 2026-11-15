@@ -1,5 +1,5 @@
-//! CLI entry point. Run it from the repository root: the `--comparator` and
-//! `--beam-skill` defaults are relative paths.
+//! CLI entry point. Run it from the repository root: the `--beam-skill`
+//! default is a relative path.
 //!
 //! Exits 0 when a proof is verified and published, 2 when every lead stopped
 //! without one, and 1 on any other error.
@@ -7,8 +7,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use harness::agent::AgentConfig;
-use harness::pool::PoolConfig;
 use harness::responses::{Client, ModelConfig};
+use harness::runtime;
 use harness::sandbox::SandboxSpec;
 use harness::search::Harness;
 use harness::{prompt, trace, verify};
@@ -21,11 +21,11 @@ use worktrees::{Options, Pool, RelPath};
 
 /// Prove the theorems of a Lean project template with parallel LLM agents.
 ///
-/// Every attempt runs in its own Docker sandbox attached to a Beam pool.
+/// Every attempt runs in its own Docker sandbox with its own Beam runtime.
 #[derive(Parser, Debug)]
 #[command(version)]
 struct Cli {
-    /// Trusted Lean project in the pool image's layout (Proofs/Challenge.lean,
+    /// Trusted Lean project in the agent image's layout (Proofs/Challenge.lean,
     /// Proofs/Solution.lean, config.json, the image's lakefile and manifest).
     #[arg(long)]
     template: PathBuf,
@@ -38,28 +38,15 @@ struct Cli {
     /// Number of independent top-level agents.
     #[arg(short = 'n', long, default_value_t = 1)]
     agents: usize,
-    /// Comparator checkout with built binaries.
-    #[arg(long, default_value = "comparator")]
-    comparator: PathBuf,
-    /// The pool image's prepared `.lake/packages`, extracted to the host.
+    /// The agent image's prepared `.lake/packages`, extracted to the host.
     #[arg(long)]
     packages: PathBuf,
-    /// Beam pool image, used for sandboxes.
-    #[arg(long, default_value = "beam-pool:local")]
+    /// Image containing the Lean SDK and native Beam runtime.
+    #[arg(long, default_value = "eureka-lean:local")]
     image: String,
-    /// Internal Docker network shared by sandboxes and the pool gateway.
-    #[arg(long, default_value = "harness-agents")]
+    /// Docker network; use an internal network to enable optional retrieval.
+    #[arg(long, default_value = "none")]
     network: String,
-    /// Pool gateway as seen from that network.
-    #[arg(long, default_value = "gateway:9000")]
-    pool_endpoint: String,
-    /// File containing the pool's shared token.
-    #[arg(long)]
-    pool_token_file: PathBuf,
-    /// Seconds allowed for attaching a sandbox to the pool. Attaching hashes
-    /// every prepared file, Mathlib included, so it is CPU-bound.
-    #[arg(long, default_value_t = 300)]
-    pool_attach_timeout_secs: u64,
     /// Memory limit per sandbox.
     #[arg(long, default_value_t = 12 * 1024)]
     memory_mib: u64,
@@ -118,11 +105,12 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    // Catch bad paths, missing Comparator binaries and unknown theorem names
+    // Catch bad paths, unsupported Lean versions and invalid verification configuration
     // before spending anything on the model.
     let template = std::fs::canonicalize(&cli.template)?;
     let packages = std::fs::canonicalize(&cli.packages)?;
-    let mut verifier = verify::Comparator::from_checkout(&cli.comparator, &template)?;
+    runtime::validate_packages(&template, &packages)?;
+    let mut verifier = verify::LeanVerifier::from_template(&template)?;
     verifier.deps = Some(packages.clone());
     let mut options = Options::default();
     // Beam keeps per-attempt session state in .beam; it isn't part of the project.
@@ -163,17 +151,13 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     anyhow::ensure!(cli.agents > 0, "--agents must be positive");
+    let image = runtime::validate_image(&cli.image, &template).await?;
     // A seed only sets the starting file; the conversation starts fresh.
     let seed = cli.seed.as_ref().map(std::fs::read_to_string).transpose()?;
     let api_key = std::env::var("DEEPSEEK_API_KEY")
         .or_else(|_| std::env::var("OPENAI_API_KEY"))
         .context("set DEEPSEEK_API_KEY or OPENAI_API_KEY")?;
-    let token = std::fs::read_to_string(&cli.pool_token_file)
-        .with_context(|| format!("read {}", cli.pool_token_file.display()))?
-        .trim()
-        .to_owned();
-
-    // The API key stays on the host. Sandboxes only get PoolConfig::env.
+    // The API key stays on the host. Only explicit runtime variables enter containers.
     let client = Client::new(ModelConfig {
         base_url: cli.base_url,
         api_key,
@@ -184,25 +168,19 @@ async fn main() -> Result<()> {
         idle_timeout: Duration::from_secs(60 * 60),
         max_attempts: 5,
     })?;
-    let beam_pool = PoolConfig::new(
-        cli.pool_endpoint,
-        token,
-        Duration::from_secs(cli.pool_attach_timeout_secs),
-    );
     let harness = Arc::new(Harness {
         task,
         client,
         sandbox: SandboxSpec {
-            image: cli.image,
+            image,
             network: cli.network,
             packages,
             run_id,
             memory_mib: cli.memory_mib,
             cpus: cli.cpus,
             pids: 512,
-            env: beam_pool.env(),
+            env: runtime::env(),
         },
-        pool: beam_pool,
         trace: Arc::new(trace::Trace::open(&cli.trace)?),
         agent: AgentConfig {
             max_turns: cli.max_turns,

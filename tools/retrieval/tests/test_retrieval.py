@@ -19,7 +19,7 @@ from backends import Backends, Loogle, SearchError, SearchRequest
 from local import local_search
 from service import create_app
 
-SNAPSHOT = {"lean_toolchain": "leanprover/lean4:v4.33.0", "mathlib_revision": "fixture"}
+SNAPSHOT = {"lean_toolchain": "leanprover/lean4:v4.35.0", "mathlib_revision": "fixture"}
 
 
 class SearchTests(unittest.IsolatedAsyncioTestCase):

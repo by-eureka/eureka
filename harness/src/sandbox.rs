@@ -1,12 +1,8 @@
 //! One hardened Docker container per attempt.
 //!
-//! The container runs Beam's pool image so the local Lean server and the
-//! pool workers share one prepared environment. It sits on an internal Docker
-//! network: no internet, but it can reach the pool gateway and anything else on
-//! that network, such as the retrieval service. The store and other attempts are
-//! not mounted. Inside, the attempt root is `/work`, writable as the harness
-//! user's uid; the prepared packages are bind-mounted read-only at
-//! `/work/.lake/packages` (Beam's attachment rejects symlinks leaving the root).
+//! Each container has a native Beam/Lean runtime. Networking is disabled by
+//! default; an internal Docker network can connect optional retrieval services.
+//! Only the attempt root is writable. Prepared dependencies are mounted read-only.
 //!
 //! Nothing is cleaned up on drop. Callers must `close` the sandbox before
 //! freezing the workspace, and `prune` removes whatever a run left behind.
@@ -27,9 +23,9 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 pub struct SandboxSpec {
-    /// Beam's pool image; used for workers and sandboxes alike.
+    /// Image containing the pinned Lean SDK and native Beam runtime.
     pub image: String,
-    /// Internal Docker network shared with the pool gateway.
+    /// Docker network name, or `none` for disconnected execution.
     pub network: String,
     /// Host directory holding the image's prepared `.lake/packages`.
     pub packages: PathBuf,
@@ -38,7 +34,7 @@ pub struct SandboxSpec {
     pub memory_mib: u64,
     pub cpus: f32,
     pub pids: u32,
-    /// Environment passed to every command (pool endpoint, token, Beam paths).
+    /// Explicit runtime environment passed to every command; no host credentials.
     pub env: Vec<(String, String)>,
 }
 

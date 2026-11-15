@@ -121,15 +121,13 @@ def templates(reference, output, policies):
         for name in ('Challenge.lean', 'Solution.lean'):
             (template / 'Proofs' / name).write_bytes(source)
         config = {'challenge_module': 'Proofs.Challenge', 'solution_module': 'Proofs.Solution',
-                  'theorem_names': [record['theorem_name']], 'permitted_axioms': axioms,
-                  'allow_bv_decide': True, 'enable_nanoda': False}
+                  'theorem_names': [record['theorem_name']], 'permitted_axioms': axioms}
         (template / 'config.json').write_text(json.dumps(config, indent=2) + '\n')
         prompt = ('Prove the verification condition in Proofs/Solution.lean. Preserve the supplied '
                   'definitions, axioms, theorem statement and imports. Fill the proof hole; add '
                   'proof lemmas if useful. Use the Lean tools and submit a complete proof. '
                   'Work from the supplied input and mathematical libraries. Do not look up '
-                  'benchmark reference solutions. bv_decide is supported: Comparator rechecks '
-                  'its certificate before permitting its native assertion. native_decide, '
+                  'benchmark reference solutions. Proofs must pass the bundled Lean verifier. native_decide, '
                   'sorry and additional axioms are not permitted. For local search use a '
                   'declaration-name fragment; for Loogle use qualified constants or quoted '
                   'name substrings. Use actual zero-based file positions with lean_todo. '

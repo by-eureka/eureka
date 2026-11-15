@@ -1,34 +1,28 @@
 //! Isolation properties of an attempt sandbox, asserted from inside it.
-//! Skips when Docker or the pool image is unavailable.
-//! Needs Docker and the beam-pool:local image, nothing else:
+//! Requires HARNESS_IMAGE naming the built runtime image:
 //!
-//!     cargo test --locked --manifest-path harness/Cargo.toml --test sandbox -- --nocapture
-//!
-//! A skipped test still passes, so look for "skipping" in the output.
+//! HARNESS_IMAGE=eureka-lean:local cargo test --test sandbox -- --ignored --nocapture
 
 use harness::sandbox::{Sandbox, SandboxSpec, WORK, prune};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-const IMAGE: &str = "beam-pool:local";
-
 struct Fixture {
     dir: PathBuf,
     network: String,
+    image: String,
 }
 
 impl Fixture {
-    fn new(tag: &str) -> Option<Self> {
+    fn new(tag: &str) -> Self {
+        let image = std::env::var("HARNESS_IMAGE").expect("set HARNESS_IMAGE");
         let have_image = Command::new("docker")
-            .args(["image", "inspect", IMAGE])
+            .args(["image", "inspect", &image])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
-        if !have_image {
-            eprintln!("skipping: docker or image {IMAGE} unavailable");
-            return None;
-        }
+        assert!(have_image, "runtime image {image} unavailable");
         let id = format!("sandbox-test-{tag}-{}", std::process::id());
         let dir = std::env::temp_dir().join(&id);
         std::fs::create_dir_all(dir.join("root")).unwrap();
@@ -41,12 +35,16 @@ impl Fixture {
             .status
             .success();
         assert!(ok, "create test network");
-        Some(Self { dir, network: id })
+        Self {
+            dir,
+            network: id,
+            image,
+        }
     }
 
     fn spec(&self) -> SandboxSpec {
         SandboxSpec {
-            image: IMAGE.into(),
+            image: self.image.clone(),
             network: self.network.clone(),
             packages: self.dir.join("packages"),
             run_id: self.network.clone(),
@@ -98,10 +96,9 @@ async fn sh(sandbox: &Sandbox, script: &str) -> (bool, String) {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker and HARNESS_IMAGE"]
 async fn sandbox_isolates_the_attempt() {
-    let Some(f) = Fixture::new("isolation") else {
-        return;
-    };
+    let f = Fixture::new("isolation");
     let root = f.dir.join("root");
     let sandbox = Sandbox::create(&f.spec(), "agent-1/0-test", &root)
         .await
@@ -152,11 +149,10 @@ async fn sandbox_isolates_the_attempt() {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker and HARNESS_IMAGE"]
 async fn prune_removes_every_container_of_a_run() {
     // Two sandboxes dropped without close. Prune finds both, then nothing.
-    let Some(f) = Fixture::new("prune") else {
-        return;
-    };
+    let f = Fixture::new("prune");
     let root = f.dir.join("root");
     let spec = f.spec();
     let _a = Sandbox::create(&spec, "a", &root).await.unwrap();
@@ -166,10 +162,9 @@ async fn prune_removes_every_container_of_a_run() {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker and HARNESS_IMAGE"]
 async fn shell_timeout_kills_descendants_and_bounds_output() {
-    let Some(f) = Fixture::new("timeout") else {
-        return;
-    };
+    let f = Fixture::new("timeout");
     let root = f.dir.join("root");
     let sandbox = Sandbox::create(&f.spec(), "timeout", &root).await.unwrap();
     // A TERM-resistant grandchild must receive the timeout's group KILL.

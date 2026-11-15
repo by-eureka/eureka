@@ -94,7 +94,7 @@ for name, value in {"template": str(template), "seed": str(candidate),
 (scratch / "restart.json").write_text(json.dumps(metadata, indent=2) + "\n")
 PY
 
-# run.sh supplies --dont-give-up and the usual model, pool and retrieval settings.
+# run.sh supplies --dont-give-up and the usual model, runtime and retrieval settings.
 run=$(cat "$scratch/run")
 "$ROOT/scripts/run.sh" "$(cat "$scratch/template")" "$run" \
     --seed "$(cat "$scratch/seed")" --prompt "$(cat "$scratch/prompt")"

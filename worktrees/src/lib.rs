@@ -36,7 +36,7 @@
 //! represented in the policy ID. Prepare dependency artifacts in each fresh
 //! verification workspace using trusted copies/reflinks or enforced read-only
 //! mounts plus private outputs. NEVER reuse an agent's .lake for verification.
-//! Comparator can write .lake while checking; all non-excluded source inputs
+//! The verifier can write .lake while checking; all non-excluded source inputs
 //! are compared byte-for-byte after the verifier returns.
 //!
 //! For ../ sibling packages, capture a trusted bundle containing the project
@@ -61,19 +61,19 @@
 //! use std::{path::Path, sync::Arc};
 //! use worktrees::{Options, Pool, RelPath, Verification, Verifier, VerifyError};
 //!
-//! struct ComparatorAdapter;
-//! impl Verifier for ComparatorAdapter {
+//! struct LeanAdapter;
+//! impl Verifier for LeanAdapter {
 //!     fn policy_id(&self) -> &str {
-//!         "my-pinned-comparator-and-toolchain-and-axiom-policy-v1"
+//!         "my-pinned-lake-and-toolchain-and-axiom-policy-v1"
 //!     }
 //!     fn verify(&self, input: &Verification<'_>) -> Result<String, VerifyError> {
-//!         // Trusted runner implementation: invoke Comparator in input.root(),
+//!         // Trusted runner implementation: invoke `lake comparator` in input.root(),
 //!         // with timeout/process-tree supervision and the sandbox required by
-//!         // the PINNED Comparator version. The template contains Challenge.lean,
+//!         // the pinned Lean version. The template contains Challenge.lean,
 //!         // Solution.lean, config.json and trusted Lake files. Only Solution.lean
-//!         // is a target. Comparator reads its JSON config; it is NOT passed
+//!         // is a target. Lake reads its JSON config; it is NOT passed
 //!         // a bare target filename as though it were a compiler.
-//!         // See https://github.com/leanprover/comparator for its prerequisites.
+//!         // Lean 4.35+ bundles the verifier and requires Bubblewrap on Linux.
 //!         let _ = (input.root(), input.target());
 //!         Err(VerifyError::Rejected("wire in your supervised runner".into()))
 //!     }
@@ -81,7 +81,7 @@
 //!
 //! let pool = Pool::create(
 //!     Path::new("/trusted/template"), Path::new("/private/runs"),
-//!     Options::default(), Arc::new(ComparatorAdapter),
+//!     Options::default(), Arc::new(LeanAdapter),
 //! )?;
 //! let task = pool.task(RelPath::new("Solution.lean")?)?;
 //! let mut attempt = task.attempt("agent-1")?;

@@ -1,7 +1,7 @@
 # Retrieval tools
 
 An optional MCP server that gives Eureka's agents Lean search tools.
-It needs the Beam pool image and the `harness-agents` network from the [pool setup](../../harness/deploy/README.md).
+It needs the native Lean/Beam image from [runtime setup](../../harness/deploy/README.md). `scripts/setup-retrieval.sh` creates the internal `harness-agents` network.
 
 From the repository root, build the agent image and start the shared service:
 
@@ -13,7 +13,7 @@ docker compose -f tools/retrieval/compose.yaml up -d --build --wait
 Then add these to the usual harness command:
 
 ```sh
---image eureka-agent:local --mcp tools/retrieval/mcp.json
+--image eureka-agent:local --network harness-agents --mcp tools/retrieval/mcp.json
 ```
 
 ## Tools
@@ -37,8 +37,8 @@ Keep it on a trusted internal Docker network.
 
 The service runs one Loogle process, so give it about 12 GB of RAM.
 The first image build compiles Loogle and indexes Mathlib; later starts reuse that index.
-If you change Beam or Mathlib, rebuild both images and extract matching packages again as described in the [pool setup](../../harness/deploy/README.md).
-To use a different Beam image, pass `--build-arg BEAM_IMAGE=...` when building the client and set `BEAM_POOL_IMAGE=...` for Compose.
+If you change Beam or Mathlib, rebuild both images and extract matching packages again as described in the [runtime setup](../../harness/deploy/README.md).
+To use a different Beam image, pass `--build-arg BEAM_IMAGE=...` when building the client and set `BEAM_IMAGE=...` for Compose.
 
 To stop just the retrieval service, run `docker compose -f tools/retrieval/compose.yaml down`.
 
@@ -52,7 +52,7 @@ tools/retrieval/.venv/bin/pip install -r tools/retrieval/requirements.txt
 tools/retrieval/.venv/bin/python -m unittest discover -s tools/retrieval/tests -v
 ```
 
-There is also an end-to-end test. With the pool and retrieval running, set the usual `HARNESS_PACKAGES` and `HARNESS_POOL_TOKEN_FILE` variables and run:
+There is also an end-to-end test. With the runtime image built and retrieval running, set `HARNESS_PACKAGES` and `HARNESS_IMAGE` and run:
 
 ```sh
 HARNESS_RETRIEVAL_IMAGE=eureka-agent:local python3 harness/tests/lifecycle.py Lifecycle.test_retrieval_in_sandbox -v

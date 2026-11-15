@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Local integration tests: real sandboxes/Beam/Comparator, scripted model responses.
+"""Local integration tests: real sandboxes/Beam/Lake verifier, scripted model responses.
 No model provider, API keys, or paid requests are used.
 
-Build the harness, start the Beam pool, then from the repository root:
-    export HARNESS_PACKAGES=/path/to/pool-packages
-    export HARNESS_POOL_TOKEN_FILE=/path/to/pool.token
+Build the harness and native runtime image, then from the repository root:
+    export HARNESS_PACKAGES=/path/to/lean-packages
+    export HARNESS_IMAGE=eureka-lean:local
     python3 harness/tests/lifecycle.py -v
 
 test_retrieval_in_sandbox also needs HARNESS_RETRIEVAL_IMAGE and the retrieval service.
@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import tempfile
 import threading
 import unittest
@@ -79,7 +80,7 @@ class Model(BaseHTTPRequestHandler):
             self.send_error(500)
 
 
-@unittest.skipUnless(os.getenv('HARNESS_PACKAGES') and os.getenv('HARNESS_POOL_TOKEN_FILE'), 'set pool fixture variables')
+@unittest.skipUnless(os.getenv('HARNESS_PACKAGES') and os.getenv('HARNESS_IMAGE'), 'set runtime fixture variables')
 class Lifecycle(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='harness-lifecycle-')
@@ -90,7 +91,7 @@ class Lifecycle(unittest.TestCase):
         self.thread.start()
         self.args = [str(ROOT/'harness/target/debug/harness'), '--template', str(ROOT/'examples/simple'),
                      '--store', str(self.dir), '--packages', os.environ['HARNESS_PACKAGES'],
-                     '--pool-token-file', os.environ['HARNESS_POOL_TOKEN_FILE'], '--comparator', str(ROOT/'comparator'),
+                     '--image', os.environ['HARNESS_IMAGE'],
                      '--beam-skill', str(ROOT/'lean-beam/skills/lean-beam'), '--trace', str(self.dir/'trace.jsonl'),
                      '--base-url', f'http://127.0.0.1:{self.server.server_port}', '--max-turns', '12', '--logprobs=false']
 
@@ -109,6 +110,71 @@ class Lifecycle(unittest.TestCase):
 
     def records(self):
         return [json.loads(p.read_text()) for p in sorted(self.dir.glob('pool-*/attempts/*/result.json'))]
+
+    def test_missing_packages_stop_before_model_requests(self):
+        packages = self.dir / 'empty-packages'
+        packages.mkdir()
+        self.args[self.args.index('--packages') + 1] = str(packages)
+        self.server.respond = lambda _: self.fail('invalid packages called the model')
+        result = self.run_harness()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('prepared package', result.stderr)
+        self.assertEqual(self.records(), [])
+
+    def test_workspace_setup_failure_stops_before_model_requests(self):
+        template = self.dir / 'template'
+        shutil.copytree(ROOT / 'examples/simple', template,
+                        ignore=shutil.ignore_patterns('.lake', '.beam'))
+        solution = template / 'Proofs/Solution.lean'
+        solution.write_text('import MissingDependency\n' + solution.read_text())
+        self.args[self.args.index('--template') + 1] = str(template)
+        self.server.respond = lambda _: self.fail('broken workspace called the model')
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        record, = self.records()
+        self.assertEqual(record['termination'], 'startup_error')
+        self.assertEqual(record['turns'], 0)
+        self.assertEqual(record['usage']['output_tokens'], 0)
+
+    def test_wrong_package_revision_stops_before_model_requests(self):
+        template = self.dir / 'template'
+        shutil.copytree(ROOT / 'examples/simple', template,
+                        ignore=shutil.ignore_patterns('.lake', '.beam'))
+        manifest_path = template / 'lake-manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['packages'][0]['rev'] = '0' * 40
+        manifest_path.write_text(json.dumps(manifest))
+        self.args[self.args.index('--template') + 1] = str(template)
+        self.server.respond = lambda _: self.fail('mismatched dependency called the model')
+        result = self.run_harness()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('does not match manifest revision', result.stderr)
+        self.assertEqual(self.records(), [])
+
+    def test_mathlib_imports_work_from_readonly_packages(self):
+        template = self.dir / 'template'
+        shutil.copytree(ROOT / 'examples/simple', template,
+                        ignore=shutil.ignore_patterns('.lake', '.beam'))
+        for module in ('Challenge', 'Solution'):
+            path = template / 'Proofs' / f'{module}.lean'
+            path.write_text('import Mathlib\n' + path.read_text())
+        self.args[self.args.index('--template') + 1] = str(template)
+        turns = 0
+        def respond(body):
+            nonlocal turns
+            turns += 1
+            if turns == 1:
+                return [call('lean_check', {'text': '#check @sq_nonneg'})]
+            output = [i['output'] for i in body['input'] if i.get('type') == 'function_call_output'][-1]
+            self.assertNotIn('ERROR:', output)
+            self.assertIn('sq_nonneg', output)
+            return [call('write_file', {'path': 'Proofs/Solution.lean', 'content': 'import Mathlib\n' + PROOF}),
+                    call('submit', {'note': 'Mathlib imports and read-only packages work'})]
+        self.server.respond = respond
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(turns, 2)
+        self.assertEqual(self.records()[0]['status'], 'verified')
 
     def test_default_capture_keeps_reasoning_logprobs_and_interrupted_stream(self):
         self.args.remove('--logprobs=false')
@@ -256,7 +322,7 @@ class Lifecycle(unittest.TestCase):
         self.assertTrue(Path(row['candidate']).is_file())
 
     def test_long_lived_agent_compacts_twenty_times_and_does_not_give_up(self):
-        # Real HTTP, filesystem snapshots, sandbox and final Comparator check.
+        # Real HTTP, filesystem snapshots, sandbox and final Lake verifier check.
         # Summaries do not reset the lifetime turn budget, file or tool state.
         normal, summaries, overflow = 0, 0, False
         original = None
@@ -432,7 +498,8 @@ class Lifecycle(unittest.TestCase):
             observed[:] = [i['output'] for i in body['input'] if i.get('type') == 'function_call_output']
             return [dict(type='message', role='assistant', content=[dict(type='output_text', text='search smoke complete')])]
         self.server.respond = respond
-        result = self.run_harness('--image', os.environ['HARNESS_RETRIEVAL_IMAGE'],
+        self.args[self.args.index('--image') + 1] = os.environ['HARNESS_RETRIEVAL_IMAGE']
+        result = self.run_harness('--network', os.getenv('HARNESS_RETRIEVAL_NETWORK', 'harness-agents'),
                                   '--mcp', str(ROOT/'tools/retrieval/mcp.json'))
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual(len(observed), 4, result.stderr)

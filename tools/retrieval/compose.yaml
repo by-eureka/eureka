@@ -6,7 +6,7 @@ services:
       context: .
       target: service
       args:
-        BEAM_IMAGE: ${BEAM_POOL_IMAGE:-beam-pool:local}
+        BEAM_IMAGE: ${BEAM_IMAGE:-eureka-lean:local}
     init: true
     read_only: true
     tmpfs: ["/tmp:rw,size=64m"]

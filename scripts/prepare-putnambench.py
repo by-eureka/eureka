@@ -4,7 +4,7 @@
     python3 scripts/prepare-putnambench.py runs/putnambench-upstream runs/putnambench
 
 Use a pinned upstream checkout. Answer placeholders are filled from the official
-answer comments. The theorem and its proof hole stay unchanged. Comparator treats
+answer comments. The theorem and its proof hole stay unchanged. The bundled Lean verifier treats
 these answers as fixed definitions, so a candidate cannot redefine the question.
 Only generated templates enter agent sandboxes; the reference checkout stays out.
 """
@@ -60,7 +60,7 @@ def prepare(reference, output):
         text, answers = proof_input(raw, path.stem)
         if not text.startswith('import Mathlib\n'):
             raise ValueError(f'{path.stem}: unexpected import header')
-        # Keep the prepared pool's Lake configuration identical. This local
+        # Keep the prepared runtime's Lake configuration identical. This local
         # option supplies upstream's package setting without changing the snapshot.
         text = text.replace('import Mathlib\n',
                             'import Mathlib\n\nset_option autoImplicit false\n', 1)
@@ -80,7 +80,7 @@ def prepare(reference, output):
             (template / 'Proofs' / filename).write_text(text)
         config = {'challenge_module': 'Proofs.Challenge', 'solution_module': 'Proofs.Solution',
                   'theorem_names': [key], 'permitted_axioms': [
-                      'propext', 'Quot.sound', 'Classical.choice'], 'enable_nanoda': False}
+                      'propext', 'Quot.sound', 'Classical.choice']}
         (template / 'config.json').write_text(json.dumps(config, indent=2) + '\n')
         prompt = ('Prove the theorem in Proofs/Solution.lean. This is PutnamBench with '
                   'the official answers supplied. Preserve the statement and supplied '

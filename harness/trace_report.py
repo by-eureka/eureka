@@ -121,7 +121,7 @@ class TraceReader:
             self.retries[event.get('reason', '?')[:160]] += 1
         elif kind == 'verification_start':
             row['status'] = 'verifying'
-            row['active'] = 'Comparator'
+            row['active'] = 'Lean verifier'
         elif kind == 'attempt_end':
             row['status'] = event.get('status', event.get('verdict', 'finished'))
             row['active'] = None

@@ -1,6 +1,3 @@
 [submodule "lean-beam"]
 	path = lean-beam
-	url = https://github.com/DebarghaG/lean-beam.git
-[submodule "comparator"]
-	path = comparator
-	url = https://github.com/DebarghaG/comparator.git
+	url = https://github.com/leanprover/lean-beam.git

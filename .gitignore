@@ -13,6 +13,8 @@ node_modules/
 /runs/
 /store/
 /pool-packages/
+/lean-packages/
+/lean-packages.staging.*/
 /pool-packages-tapis/
 *.jsonl
 *.log

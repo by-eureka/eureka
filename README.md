@@ -7,8 +7,8 @@ In development.
 The `scripts/` directory wraps the steps below. From the repository root:
 
 ```bash
-scripts/build.sh                    # Comparator and the harness
-scripts/setup-pool.sh               # Beam image, packages, token, pool (WORKERS=4)
+scripts/build.sh                    # Rust harness
+scripts/setup-runtime.sh            # native Lean/Beam image and prepared packages
 scripts/setup-retrieval.sh          # optional: Loogle and lemma search
 scripts/new-problem.sh /path/to/Problem.lean runs/problem MyProblem.main_theorem
 scripts/run.sh runs/problem runs/mine    # BASE_URL, MODEL, RETRIEVAL=1 as needed
@@ -16,12 +16,13 @@ scripts/watch.sh runs/mine
 scripts/stop.sh runs/mine                # optional: stop early
 scripts/restart.sh runs/mine runs/next   # continue a stopped run from its saved proof
 scripts/reverify.sh runs/problem path/to/candidate.lean runs/recheck
-scripts/stop-services.sh            # shut down the pool and retrieval
+scripts/stop-services.sh            # shut down optional retrieval
 ```
 
-To use the Beam pool on Tapis instead of a local one, put its token in `.secrets/tapis-pool.token` and replace `setup-pool.sh` and `run.sh` with `connect-tapis.sh` and `run-tapis.sh`. Those use the model served on Vista; set `BASE_URL` to its current endpoint. See [Using the pool on Tapis](harness/deploy/README.md#using-the-pool-on-tapis).
+The default runtime uses Lean 4.35.0 and a matching Mathlib revision. Each attempt runs its own native Beam MCP server in an isolated container, with networking disabled unless retrieval is enabled. Prepared packages default to `lean-packages/`; set `PACKAGES` to choose a different path.
 
-The packages and pool token default to `pool-packages/` and `pool.token` in the repository root; set `PACKAGES` and `POOL_TOKEN_FILE` to use other paths.
+The old fork-specific worker pool and Tapis attachment protocol are retired. Use `BASE_URL` to select a remote model endpoint; Lean execution uses the configured Docker runtime. See [runtime setup and migration](harness/deploy/README.md).
+
 Each script explains its arguments at the top. The rest of this README covers the same steps by hand.
 
 Every run saves model requests, responses and stream events, including reasoning returned by the provider.
@@ -42,7 +43,7 @@ Use `--continuation answer.txt` to append an answer, or `--token-ids` to read a 
 No chat template is added. The first token normally has no score. Missing scores after it cause an error.
 
 `restart.sh` keeps the saved proof, handoff notes and verifier feedback. The conversation starts fresh.
-Use the same model and pool environment settings as before. It enables `--dont-give-up` through `run.sh`.
+Use the same model and runtime environment settings as before. It enables `--dont-give-up` through `run.sh`.
 It defaults to `attempt-000001`; pass another attempt ID as the third argument to resume that one.
 
 Full contexts compact automatically. The prover writes a handoff and continues with the same files and tools.
@@ -51,20 +52,19 @@ Each compaction saves its history, proof snapshot and summary under the attempt 
 
 ## Setup
 
-You need Linux, Docker, Rust 1.91+, Python 3.10+, and Lean (installed with elan).
-Clone with `--recurse-submodules`, then set up the [Beam pool](harness/deploy/README.md) and [Comparator](comparator/README.md).
-Comparator also needs `landrun` and a working systemd user session.
+You need Linux, Docker, Rust 1.91+, Python 3.10+, and Lean 4.35+ (installed with elan).
+Clone with `--recurse-submodules`, then set up the [native runtime](harness/deploy/README.md) for the selected toolchain.
+Verification uses the toolchain’s bundled `lake comparator` and needs `bwrap` (Bubblewrap) and a working systemd user session. There is no separate verifier checkout or exporter to build.
 
-Build Comparator and the harness from the repository root:
+Build the harness from the repository root:
 
 ```bash
-(cd comparator && lake build lean4export comparator)
 cargo build --locked --manifest-path harness/Cargo.toml
 ```
 
 ## Setting up a problem
 
-Start from the example template and keep its build files, so the Lean and Mathlib versions match the pool.
+Start from the example template and keep its build files, so the Lean and Mathlib versions match the runtime image.
 Your Lean file should have the imports, definitions and theorem statements, with `sorry` for every proof.
 It goes in as both the challenge and the starting solution:
 
@@ -94,7 +94,7 @@ export DEEPSEEK_API_KEY
 
 Other providers work if they support the `/responses` API. For DeepSeek's own API, use `https://api.deepseek.com` and `deepseek-flash`.
 
-Start the run, replacing the package and token paths with the ones from your pool setup.
+Start the run, using the packages extracted from your runtime image.
 Use a new `RUN` directory each time. The harness runs under `nohup`, so closing the terminal won't stop it:
 
 ```bash
@@ -102,7 +102,7 @@ RUN=runs/mine
 mkdir -p "$RUN/store"
 nohup harness/target/debug/harness \
   --template runs/problem --store "$RUN/store" \
-  --packages /path/to/pool-packages --pool-token-file /path/to/pool.token \
+  --packages /path/to/lean-packages \
   --base-url "$BASE_URL" --model "$MODEL" \
   --max-turns 200 --max-output-tokens 200000 --dont-give-up \
   --trace "$RUN/trace.jsonl" > "$RUN/run.log" 2>&1 &
@@ -110,7 +110,7 @@ echo $! > "$RUN/pid"
 ```
 
 `--max-output-tokens` includes reasoning, and input plus output has to fit in the server's context window.
-To give the agents Loogle and lemma search, set up the [retrieval tools](tools/retrieval/README.md) and add `--image eureka-agent:local --mcp tools/retrieval/mcp.json`.
+To give the agents Loogle and lemma search, set up the [retrieval tools](tools/retrieval/README.md) and add `--image eureka-agent:local --network harness-agents --mcp tools/retrieval/mcp.json`.
 
 To stop a run early, use `scripts/stop.sh "$RUN"`. The agents save their work before the harness exits.
 
@@ -128,4 +128,4 @@ The live dashboard needs Rich: `python3 -m pip install -r harness/requirements.t
 Pass several run directories to `scripts/watch.sh` to see them together. Ctrl-C closes only the monitor.
 For a snapshot or JSON, use `python3 harness/trace_report.py "$RUN/trace.jsonl"` with optional `--json`.
 A long model response can leave the trace quiet for a while until it finishes.
-In the status column, `verified` means Comparator accepted the proof, `finished` means a helper handed its work back to the lead, and `not_submitted` means the agent stopped without submitting anything.
+In the status column, `verified` means Lean’s bundled verifier accepted the proof, `finished` means a helper handed its work back to the lead, and `not_submitted` means the agent stopped without submitting anything.

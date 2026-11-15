@@ -1,12 +1,12 @@
 //! Lean theorem-proving harness: an agent loop over the OpenAI Responses API,
-//! Lean Beam over MCP, worktrees isolation, and Comparator verification.
+//! Lean Beam over MCP, worktrees isolation, and bundled Lean verification.
 //!
 //! The call path is main -> search -> agent -> tools. [`search::Harness`] runs
 //! the attempts: leads, plus any helpers a lead spawns. Each attempt gets its own
 //! project copy, Docker container and conversation.
 //!
 //! When a lead submits, the harness stops its container, takes the target file,
-//! puts it into a fresh copy of the trusted template and runs Comparator there
+//! puts it into a fresh copy of the trusted template and runs `lake comparator` there
 //! ([`verify`]). Only a proof that passes is published. Whatever else the agent
 //! changed in its workspace is thrown away.
 //!
@@ -17,11 +17,10 @@
 pub mod agent;
 pub mod beam;
 mod compaction;
-pub mod deps;
 pub mod lean_text;
-pub mod pool;
 pub mod prompt;
 pub mod responses;
+pub mod runtime;
 pub mod sandbox;
 pub mod search;
 pub mod tools;

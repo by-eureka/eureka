@@ -4,7 +4,7 @@
     python3 scripts/prepare-verina.py /path/to/verina runs/verina-batch
 
 Use a pinned reference checkout. Remove the marked proof and proof_aux contents, then apply
-small, recorded library compatibility edits for the harness's Lean 4.33 toolchain. Reference
+small, recorded library compatibility edits for the harness's Lean 4.35 toolchain. Reference
 proofs stay outside the templates, which are the only files mounted in prover sandboxes.
 """
 import argparse
@@ -112,8 +112,7 @@ def prepare(reference, output):
         supplied_axioms = re.findall(r'^\s*axiom\s+([^\s({:]+)', text, re.M)
         config = {'challenge_module': 'Proofs.Challenge', 'solution_module': 'Proofs.Solution',
                   'theorem_names': [name], 'permitted_axioms': [
-                      'propext', 'Quot.sound', 'Classical.choice', *supplied_axioms],
-                  'enable_nanoda': False}
+                      'propext', 'Quot.sound', 'Classical.choice', *supplied_axioms]}
         (template / 'config.json').write_text(json.dumps(config, indent=2) + '\n')
         description = (directory / task['description_file']).read_text().strip()
         prompt = ('Prove the correctness theorem in Proofs/Solution.lean. The supplied program, '

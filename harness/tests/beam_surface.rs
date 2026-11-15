@@ -1,8 +1,8 @@
-//! Drives every Beam operation the harness exposes against `examples/simple`,
-//! without a model. Uses a host install at `~/.local/bin/lean-beam-mcp` and
-//! skips when it is missing:
-//!
-//!     cargo test --locked --manifest-path harness/Cargo.toml --test beam_surface -- --nocapture
+//! Exercise the public MCP surface with a qualified native runtime.
+//! Set HARNESS_BEAM_MCP; HARNESS_LEAN_TOOLCHAIN can select another compiler.
+//! HARNESS_TEST_TEMPLATE defaults to examples/core; use examples/simple and
+//! HARNESS_PACKAGES to additionally exercise prepared Mathlib integration.
+//! cargo test --test beam_surface -- --ignored --nocapture
 
 use harness::beam::{Beam, host_server};
 use harness::lean_text::command_line;
@@ -14,8 +14,17 @@ struct Project(PathBuf);
 impl Project {
     fn new() -> Self {
         let dir = std::env::temp_dir().join(format!("beam-surface-{}", std::process::id()));
-        let template = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/simple");
+        let template = std::env::var_os("HARNESS_TEST_TEMPLATE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/core"));
         copy_dir(&template, &dir);
+        if let Ok(toolchain) = std::env::var("HARNESS_LEAN_TOOLCHAIN") {
+            std::fs::write(dir.join("lean-toolchain"), toolchain + "\n").unwrap();
+        }
+        if let Some(packages) = std::env::var_os("HARNESS_PACKAGES") {
+            std::fs::create_dir_all(dir.join(".lake")).unwrap();
+            std::os::unix::fs::symlink(packages, dir.join(".lake/packages")).unwrap();
+        }
         Self(dir)
     }
 }
@@ -44,9 +53,10 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
-fn mcp_binary() -> Option<PathBuf> {
-    let path = PathBuf::from(std::env::var("HOME").ok()?).join(".local/bin/lean-beam-mcp");
-    path.is_file().then_some(path)
+fn mcp_binary() -> PathBuf {
+    std::env::var_os("HARNESS_BEAM_MCP")
+        .map(PathBuf::from)
+        .expect("set HARNESS_BEAM_MCP to the pinned native runtime's lean-beam-mcp")
 }
 
 async fn call(beam: &Beam, _root: &Path, name: &str, args: Value) -> Value {
@@ -55,15 +65,17 @@ async fn call(beam: &Beam, _root: &Path, name: &str, args: Value) -> Value {
 }
 
 #[tokio::test]
+#[ignore = "requires HARNESS_BEAM_MCP pointing at a qualified native runtime"]
 async fn every_lean_operation_works() {
-    let Some(mcp) = mcp_binary() else {
-        eprintln!("skipping: lean-beam-mcp not installed");
-        return;
-    };
+    let mcp = mcp_binary();
     let project = Project::new();
     let root = project.0.as_path();
     let beam = Beam::spawn(host_server(&mcp), root).await.unwrap();
 
+    assert!(
+        !beam.instructions().is_empty(),
+        "missing shared MCP instructions"
+    );
     let names: Vec<&str> = beam.tools().iter().map(|t| t.name.as_str()).collect();
     for expected in [
         "lean_update",
@@ -245,8 +257,14 @@ async fn every_lean_operation_works() {
     .await;
     assert!(ws.to_string().contains("add_comm"), "{ws}");
 
-    // Todo discovery sees both sorries; suggestions may carry code actions.
-    let todo = call(&beam, root, "lean_todo", json!({"path": "Proofs/Solution.lean", "version": version, "start_line": 0, "start_character": 0, "end_line": 4, "end_character": 0, "suggest": "basic"})).await;
+    // Whole-file todo no longer requires a range or a suggestion mode.
+    let todo = call(
+        &beam,
+        root,
+        "lean_todo",
+        json!({"path": "Proofs/Solution.lean", "version": version}),
+    )
+    .await;
     let items = todo["items"].as_array().unwrap();
     assert!(items.len() >= 2, "{todo}");
     let sorry = items
@@ -256,9 +274,10 @@ async fn every_lean_operation_works() {
     assert_eq!(sorry["run_at_position"], json!({"line": 1, "character": 2}));
 
     // An identical probe with an invalid version must reach Beam and fail.
-    let stale = beam.call("lean_goals", &json!({"path": "Proofs/Solution.lean", "version": version + 1000, "line": 1, "character": 2, "mode": "before"})).await.unwrap();
+    let stale = beam.call("lean_goals", &json!({"path": "Proofs/Solution.lean", "version": version + 1000, "line": 1, "character": 2, "mode": "before"})).await.unwrap_err();
+    let stale = format!("{stale:#}");
     assert!(
-        stale.starts_with("ERROR"),
+        stale.contains("contentModified"),
         "stale version accepted: {stale}"
     );
 
@@ -307,4 +326,77 @@ async fn every_lean_operation_works() {
         json!({"path": "Proofs/Solution.lean"}),
     )
     .await;
+
+    // New upstream capabilities: term holes, profiling, and explicit recovery.
+    let holes = root.join("Proofs/Holes.lean");
+    let source = "theorem term_hole : True := sorry\n";
+    std::fs::write(&holes, source).unwrap();
+    let version = call(
+        &beam,
+        root,
+        "lean_update",
+        json!({"path":"Proofs/Holes.lean"}),
+    )
+    .await["version"]
+        .as_u64()
+        .unwrap();
+    let todos = call(
+        &beam,
+        root,
+        "lean_todo",
+        json!({"path":"Proofs/Holes.lean", "version":version}),
+    )
+    .await;
+    let item = todos["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "sorry")
+        .unwrap();
+    let pos = &item["run_at_position"];
+    let mut args = json!({"path":"Proofs/Holes.lean", "version":version,
+        "line":pos["line"], "character":pos["character"], "text":"trivial", "profile":true});
+    let profiled = call(&beam, root, "lean_run_at", args.clone()).await;
+    assert_eq!(profiled["success"], true, "{profiled}");
+    assert!(
+        profiled["profile"]["elapsed_ms"].as_f64().is_some(),
+        "{profiled}"
+    );
+    assert!(profiled["profile"]["spans"].is_array(), "{profiled}");
+    assert_eq!(std::fs::read_to_string(&holes).unwrap(), source);
+
+    args["text"] = json!("skip");
+    let minted = call(&beam, root, "lean_run_at_handle", args).await;
+    let handle = &minted["next_handle"];
+    assert!(handle.is_object(), "{minted}");
+    let continuation = json!({"path":"Proofs/Holes.lean", "handle":handle, "text":"trivial"});
+    assert!(
+        beam.call("lean_run_with", &continuation).await.is_err(),
+        "profile mode must match"
+    );
+    let mut continuation = continuation;
+    continuation["profile"] = json!(true);
+    let done = call(&beam, root, "lean_run_with", continuation.clone()).await;
+    assert_eq!(done["success"], true, "{done}");
+    assert!(done["profile"].is_object(), "{done}");
+
+    // A real edit invalidates retained state, including a profiled parent.
+    std::fs::write(&holes, "theorem term_hole : True := trivial\n").unwrap();
+    call(
+        &beam,
+        root,
+        "lean_update",
+        json!({"path":"Proofs/Holes.lean"}),
+    )
+    .await;
+    assert!(beam.call("lean_run_with", &continuation).await.is_err());
+    call(&beam, root, "lean_drop_workspace", json!({})).await;
+    let fresh = call(
+        &beam,
+        root,
+        "lean_sync",
+        json!({"path":"Proofs/Holes.lean"}),
+    )
+    .await;
+    assert_eq!(fresh["readiness"]["save_ready"], true, "{fresh}");
 }
