@@ -2,6 +2,9 @@
 
 Each attempt runs its own Beam MCP server inside a Docker container. The image contains a complete Lean SDK and a Beam runtime built for that exact compiler. The harness keeps model credentials on the host, mounts dependencies read-only, and gives each attempt a private writable project. Containers use `--network none` by default.
 
+This runtime belongs to the `dev` channel. Keep it in a separate checkout from
+stable `main`; see [development and promotion](../../CONTRIBUTING.md).
+
 ## Setup
 
 Install Rust 1.91+, Python 3.10+, Docker, elan, Bubblewrap, and a working systemd user session. The template's Lean toolchain must be installed on the host for independent verification.
@@ -13,7 +16,7 @@ scripts/build.sh
 scripts/setup-runtime.sh
 ```
 
-`setup-runtime.sh` builds `eureka-lean:local` from the pinned Beam submodule revision, verifies the downloaded Lean release checksum, prepares the pinned Mathlib cache, and extracts packages into `lean-packages/`. Set `IMAGE` and `PACKAGES` to use different names. Package extraction publishes the directory only after it completes; an existing destination is never overwritten.
+`setup-runtime.sh` builds `eureka-lean:dev` from the pinned Beam submodule revision, verifies the downloaded Lean release checksum, prepares the pinned Mathlib cache, and extracts packages into `lean-packages-dev/`. Set `IMAGE` and `PACKAGES` to use different names. Package extraction publishes the directory only after it completes; an existing destination is never overwritten.
 
 The default template, image and packages must be upgraded together. Before calling the model, the harness checks package git revisions and compares the image's compiler commit with the template's host compiler. It then uses the image's immutable ID for the run.
 
@@ -46,7 +49,11 @@ RETRIEVAL=1 scripts/run.sh runs/problem runs/with-search
 scripts/stop-services.sh
 ```
 
-Retrieval uses the internal `harness-agents` network. Only the retrieval service has outbound access; attempt containers do not. Custom networks must preserve that boundary. See [retrieval setup](../../tools/retrieval/README.md).
+Retrieval uses the `eureka-retrieval-dev` Compose project, `eureka-retrieval:dev`
+service image, and internal `eureka-dev-agents` network. Only the retrieval
+service has outbound access; attempt containers do not. Custom networks must
+preserve that boundary. These defaults keep the stable services separate.
+See [retrieval setup](../../tools/retrieval/README.md).
 
 ## Migrating existing runs
 
@@ -61,8 +68,8 @@ cargo test --locked --manifest-path harness/Cargo.toml --lib --test responses
 python3 -m unittest discover -s harness/tests -p 'test_*.py'
 cargo test --locked --manifest-path worktrees/Cargo.toml
 cargo test --locked --manifest-path harness/Cargo.toml --test lake_verifier -- --ignored --nocapture
-HARNESS_IMAGE=eureka-lean:local cargo test --locked --manifest-path harness/Cargo.toml --test sandbox -- --ignored --nocapture
-HARNESS_PACKAGES="$PWD/lean-packages" HARNESS_IMAGE=eureka-lean:local python3 harness/tests/lifecycle.py -v
+HARNESS_IMAGE=eureka-lean:dev cargo test --locked --manifest-path harness/Cargo.toml --test sandbox -- --ignored --nocapture
+HARNESS_PACKAGES="$PWD/lean-packages-dev" HARNESS_IMAGE=eureka-lean:dev python3 harness/tests/lifecycle.py -v
 ```
 
 The lifecycle suite uses scripted HTTP responses with real Docker, Beam and verification. The optional retrieval case runs only when `HARNESS_RETRIEVAL_IMAGE` is set and its service is running. To test a host native Beam installation, set `HARNESS_BEAM_MCP` to its executable and `HARNESS_PACKAGES` to matching dependencies, then run `cargo test --locked --manifest-path harness/Cargo.toml --test beam_surface -- --ignored --nocapture`. Its `lean-toolchain` selector must resolve to that installation through elan.
@@ -70,7 +77,7 @@ The lifecycle suite uses scripted HTTP responses with real Docker, Beam and veri
 For a bounded real-model check, set `DEEPSEEK_API_KEY` in the environment and run:
 
 ```bash
-python3 scripts/smoke-model.py --packages "$PWD/lean-packages" --output runs/model-smoke
+python3 scripts/smoke-model.py --packages "$PWD/lean-packages-dev" --output runs/model-smoke
 ```
 
 This checks arithmetic and Mathlib proofs with `deepseek-flash`, at most 12 turns each. It explicitly disables logprobs because DeepSeek tool-only responses can omit them. Normal runs retain the strict logprob default. Results and proof artifacts are saved under the chosen output directory; credentials are not saved.

@@ -5,8 +5,13 @@ set -euo pipefail
 source "$(dirname "$0")/env.sh"
 cd "$ROOT"
 
-if ! docker network inspect harness-agents >/dev/null 2>&1; then
-    docker network create --internal harness-agents >/dev/null
+if docker network inspect "$RETRIEVAL_NETWORK" >/dev/null 2>&1; then
+    if [ "$(docker network inspect --format '{{.Internal}}' "$RETRIEVAL_NETWORK")" != true ]; then
+        echo "$RETRIEVAL_NETWORK must be an internal Docker network" >&2
+        exit 1
+    fi
+else
+    docker network create --internal "$RETRIEVAL_NETWORK" >/dev/null
 fi
-docker build --build-arg "BEAM_IMAGE=${BEAM_IMAGE:-eureka-lean:local}" --target client -t eureka-agent:local tools/retrieval
-docker compose -f tools/retrieval/compose.yaml up -d --build --wait
+docker build --build-arg "BEAM_IMAGE=$BEAM_IMAGE" --target client -t "$AGENT_IMAGE" tools/retrieval
+docker compose -p "$RETRIEVAL_PROJECT" -f tools/retrieval/compose.yaml up -d --build --wait

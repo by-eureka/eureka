@@ -10,10 +10,10 @@
 #   MAX_TURNS              default 200
 #   MAX_OUTPUT_TOKENS      default 200000, reasoning included; input plus output
 #                          must fit the server's context window
-#   IMAGE                  sandbox image (default: eureka-lean:local)
-#   NETWORK                defaults to none; retrieval uses harness-agents
+#   IMAGE                  sandbox image (default: BEAM_IMAGE, eureka-lean:dev)
+#   NETWORK                defaults to none; retrieval uses RETRIEVAL_NETWORK
 #   RETRIEVAL=1            add the tools from setup-retrieval.sh; defaults IMAGE to
-#                          eureka-agent:local (a custom IMAGE must include the retrieval client)
+#                          AGENT_IMAGE, eureka-agent:dev (a custom IMAGE must include the retrieval client)
 #   LOGPROBS=false         explicitly allow missing token probabilities (default: require them)
 # Requests, responses, reasoning and stream events are captured for every attempt.
 # Run `harness/target/debug/harness --help` for the other flags.
@@ -52,9 +52,9 @@ args=(
     --beam-skill "$ROOT/lean-beam/skills/lean-beam"
 )
 if [ "${RETRIEVAL:-0}" = 1 ]; then
-    args+=(--image "${IMAGE:-eureka-agent:local}" --network "${NETWORK:-harness-agents}" --mcp "$ROOT/tools/retrieval/mcp.json")
+    args+=(--image "${IMAGE:-$AGENT_IMAGE}" --network "${NETWORK:-$RETRIEVAL_NETWORK}" --mcp "$ROOT/tools/retrieval/mcp.json")
 else
-    args+=(--image "${IMAGE:-eureka-lean:local}" --network "${NETWORK:-none}")
+    args+=(--image "${IMAGE:-$BEAM_IMAGE}" --network "${NETWORK:-none}")
 fi
 
 mkdir -p "$run/store"

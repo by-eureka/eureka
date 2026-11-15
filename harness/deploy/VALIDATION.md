@@ -88,9 +88,9 @@ The [runtime guide](README.md#tests) lists the Rust, Python, native and lifecycl
 commands. For the model checks, export a provider key in the environment and run:
 
 ```bash
-IMAGE=eureka-lean:local PACKAGES="$PWD/lean-packages" scripts/setup-runtime.sh
-python3 scripts/smoke-model.py --image eureka-lean:local \
-  --packages "$PWD/lean-packages" --output runs/model-smoke
+IMAGE=eureka-lean:dev PACKAGES="$PWD/lean-packages-dev" scripts/setup-runtime.sh
+python3 scripts/smoke-model.py --image eureka-lean:dev \
+  --packages "$PWD/lean-packages-dev" --output runs/model-smoke
 ```
 
 Use a new output directory for each run. To check another toolchain, prepare its

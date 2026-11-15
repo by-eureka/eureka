@@ -33,7 +33,7 @@ def main():
     parser.add_argument("--packages", type=Path, required=True)
     parser.add_argument("--template", type=Path, default=ROOT / "examples/simple",
                         help="trusted build files for the runtime being tested")
-    parser.add_argument("--image", default="eureka-lean:local")
+    parser.add_argument("--image", default="eureka-lean:dev")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--base-url", default="https://api.deepseek.com")
     parser.add_argument("--model", default="deepseek-flash")

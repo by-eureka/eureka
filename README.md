@@ -1,6 +1,8 @@
 # Eureka
 
-In development.
+This is the **dev** version: newer changes land here first and may be less stable.
+The checked stable version is on [`main`](https://github.com/by-eureka/eureka/tree/main).
+See [development and promotion](CONTRIBUTING.md) for separate checkouts and the review process.
 
 ## Quick start
 
@@ -19,7 +21,7 @@ scripts/reverify.sh runs/problem path/to/candidate.lean runs/recheck
 scripts/stop-services.sh            # shut down optional retrieval
 ```
 
-The default runtime uses Lean 4.35.0 and a matching Mathlib revision. Each attempt runs its own native Beam MCP server in an isolated container, with networking disabled unless retrieval is enabled. Prepared packages default to `lean-packages/`; set `PACKAGES` to choose a different path.
+The default runtime uses Lean 4.35.0 and a matching Mathlib revision. Each attempt runs its own native Beam MCP server in an isolated container, with networking disabled unless retrieval is enabled. Prepared packages default to `lean-packages-dev/`; set `PACKAGES` to choose a different path.
 
 The old fork-specific worker pool and Tapis attachment protocol are retired. Use `BASE_URL` to select a remote model endpoint; Lean execution uses the configured Docker runtime. See [runtime setup and migration](harness/deploy/README.md).
 
@@ -110,7 +112,7 @@ echo $! > "$RUN/pid"
 ```
 
 `--max-output-tokens` includes reasoning, and input plus output has to fit in the server's context window.
-To give the agents Loogle and lemma search, set up the [retrieval tools](tools/retrieval/README.md) and add `--image eureka-agent:local --network harness-agents --mcp tools/retrieval/mcp.json`.
+To give the agents Loogle and lemma search, set up the [retrieval tools](tools/retrieval/README.md) and add `--image eureka-agent:dev --network eureka-dev-agents --mcp tools/retrieval/mcp.json`.
 
 To stop a run early, use `scripts/stop.sh "$RUN"`. The agents save their work before the harness exits.
 

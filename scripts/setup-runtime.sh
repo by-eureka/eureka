@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build the native Beam/Lean image and extract its prepared packages.
-# IMAGE defaults to eureka-lean:local; PACKAGES must be a new directory.
+# IMAGE defaults to BEAM_IMAGE (eureka-lean:dev); PACKAGES must be a new directory.
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 cd "$ROOT"
-image=${IMAGE:-eureka-lean:local}
+image=${IMAGE:-$BEAM_IMAGE}
 if [ -e "$PACKAGES" ]; then
     echo "$PACKAGES already exists; set PACKAGES to a new directory for this runtime" >&2
     exit 1
