@@ -31,6 +31,8 @@ CASES = {
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--packages", type=Path, required=True)
+    parser.add_argument("--template", type=Path, default=ROOT / "examples/simple",
+                        help="trusted build files for the runtime being tested")
     parser.add_argument("--image", default="eureka-lean:local")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--base-url", default="https://api.deepseek.com")
@@ -46,7 +48,7 @@ def main():
         template = run / "template"
         (template / "Proofs").mkdir(parents=True)
         for filename in ("lakefile.toml", "lake-manifest.json", "lean-toolchain", "Proofs.lean"):
-            shutil.copy2(ROOT / "examples/simple" / filename, template / filename)
+            shutil.copy2(args.template / filename, template / filename)
         for module in ("Challenge", "Solution"):
             (template / "Proofs" / f"{module}.lean").write_text(source)
         config = {"challenge_module": "Proofs.Challenge", "solution_module": "Proofs.Solution",

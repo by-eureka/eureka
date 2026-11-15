@@ -74,3 +74,5 @@ python3 scripts/smoke-model.py --packages "$PWD/lean-packages" --output runs/mod
 ```
 
 This checks arithmetic and Mathlib proofs with `deepseek-flash`, at most 12 turns each. It explicitly disables logprobs because DeepSeek tool-only responses can omit them. Normal runs retain the strict logprob default. Results and proof artifacts are saved under the chosen output directory; credentials are not saved.
+
+Pass `--template /path/to/template` with the corresponding image and packages to check another compiler. See [recorded migration validation](VALIDATION.md) for versions, outcomes and limits.
