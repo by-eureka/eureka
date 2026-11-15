@@ -3,4 +3,4 @@
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 cd "$ROOT"
-docker compose -f tools/retrieval/compose.yaml down
+docker compose -p "$RETRIEVAL_PROJECT" -f tools/retrieval/compose.yaml down

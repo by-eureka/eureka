@@ -1,7 +1,7 @@
 //! Isolation properties of an attempt sandbox, asserted from inside it.
 //! Requires HARNESS_IMAGE naming the built runtime image:
 //!
-//! HARNESS_IMAGE=eureka-lean:local cargo test --test sandbox -- --ignored --nocapture
+//! HARNESS_IMAGE=eureka-lean:dev cargo test --test sandbox -- --ignored --nocapture
 
 use harness::sandbox::{Sandbox, SandboxSpec, WORK, prune};
 use std::os::unix::fs::MetadataExt;

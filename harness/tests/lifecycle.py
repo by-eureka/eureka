@@ -4,7 +4,7 @@ No model provider, API keys, or paid requests are used.
 
 Build the harness and native runtime image, then from the repository root:
     export HARNESS_PACKAGES=/path/to/lean-packages
-    export HARNESS_IMAGE=eureka-lean:local
+    export HARNESS_IMAGE=eureka-lean:dev
     python3 harness/tests/lifecycle.py -v
 
 test_retrieval_in_sandbox also needs HARNESS_RETRIEVAL_IMAGE and the retrieval service.
@@ -499,7 +499,7 @@ class Lifecycle(unittest.TestCase):
             return [dict(type='message', role='assistant', content=[dict(type='output_text', text='search smoke complete')])]
         self.server.respond = respond
         self.args[self.args.index('--image') + 1] = os.environ['HARNESS_RETRIEVAL_IMAGE']
-        result = self.run_harness('--network', os.getenv('HARNESS_RETRIEVAL_NETWORK', 'harness-agents'),
+        result = self.run_harness('--network', os.getenv('HARNESS_RETRIEVAL_NETWORK', 'eureka-dev-agents'),
                                   '--mcp', str(ROOT/'tools/retrieval/mcp.json'))
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual(len(observed), 4, result.stderr)

@@ -1,12 +1,12 @@
-name: eureka-retrieval
+name: ${RETRIEVAL_PROJECT:-eureka-retrieval-dev}
 services:
   retrieval:
-    image: eureka-retrieval:local
+    image: ${RETRIEVAL_IMAGE:-eureka-retrieval:dev}
     build:
       context: .
       target: service
       args:
-        BEAM_IMAGE: ${BEAM_IMAGE:-eureka-lean:local}
+        BEAM_IMAGE: ${BEAM_IMAGE:-eureka-lean:dev}
     init: true
     read_only: true
     tmpfs: ["/tmp:rw,size=64m"]
@@ -24,5 +24,5 @@ services:
 networks:
   agents:
     external: true
-    name: harness-agents
+    name: ${RETRIEVAL_NETWORK:-eureka-dev-agents}
   outbound: {}

@@ -42,7 +42,7 @@ struct Cli {
     #[arg(long)]
     packages: PathBuf,
     /// Image containing the Lean SDK and native Beam runtime.
-    #[arg(long, default_value = "eureka-lean:local")]
+    #[arg(long, default_value = "eureka-lean:dev")]
     image: String,
     /// Docker network; use an internal network to enable optional retrieval.
     #[arg(long, default_value = "none")]

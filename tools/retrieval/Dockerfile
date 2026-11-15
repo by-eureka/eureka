@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-ARG BEAM_IMAGE=eureka-lean:local
+ARG BEAM_IMAGE=eureka-lean:dev
 FROM ${BEAM_IMAGE} AS python
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends python3-venv ripgrep \

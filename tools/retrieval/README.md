@@ -1,19 +1,18 @@
 # Retrieval tools
 
 An optional MCP server that gives Eureka's agents Lean search tools.
-It needs the native Lean/Beam image from [runtime setup](../../harness/deploy/README.md). `scripts/setup-retrieval.sh` creates the internal `harness-agents` network.
+It needs the native Lean/Beam image from [runtime setup](../../harness/deploy/README.md). `scripts/setup-retrieval.sh` creates the internal `eureka-dev-agents` network.
 
 From the repository root, build the agent image and start the shared service:
 
 ```sh
-docker build --target client -t eureka-agent:local tools/retrieval
-docker compose -f tools/retrieval/compose.yaml up -d --build --wait
+scripts/setup-retrieval.sh
 ```
 
 Then add these to the usual harness command:
 
 ```sh
---image eureka-agent:local --network harness-agents --mcp tools/retrieval/mcp.json
+--image eureka-agent:dev --network eureka-dev-agents --mcp tools/retrieval/mcp.json
 ```
 
 ## Tools
@@ -38,9 +37,13 @@ Keep it on a trusted internal Docker network.
 The service runs one Loogle process, so give it about 12 GB of RAM.
 The first image build compiles Loogle and indexes Mathlib; later starts reuse that index.
 If you change Beam or Mathlib, rebuild both images and extract matching packages again as described in the [runtime setup](../../harness/deploy/README.md).
-To use a different Beam image, pass `--build-arg BEAM_IMAGE=...` when building the client and set `BEAM_IMAGE=...` for Compose.
+Set `BEAM_IMAGE`, `AGENT_IMAGE`, `RETRIEVAL_IMAGE`, `RETRIEVAL_PROJECT`, and
+`RETRIEVAL_NETWORK` to use another isolated deployment. Use the same settings
+for setup, runs and shutdown. Defaults are `eureka-lean:dev`, `eureka-agent:dev`,
+`eureka-retrieval:dev`, `eureka-retrieval-dev`, and `eureka-dev-agents`.
 
-To stop just the retrieval service, run `docker compose -f tools/retrieval/compose.yaml down`.
+To stop just the development retrieval service, run `scripts/stop-services.sh`.
+This does not target the stable checkout's `eureka-retrieval` project.
 
 ## Tests
 
@@ -55,7 +58,7 @@ tools/retrieval/.venv/bin/python -m unittest discover -s tools/retrieval/tests -
 There is also an end-to-end test. With the runtime image built and retrieval running, set `HARNESS_PACKAGES` and `HARNESS_IMAGE` and run:
 
 ```sh
-HARNESS_RETRIEVAL_IMAGE=eureka-agent:local python3 harness/tests/lifecycle.py Lifecycle.test_retrieval_in_sandbox -v
+HARNESS_RETRIEVAL_IMAGE=eureka-agent:dev python3 harness/tests/lifecycle.py Lifecycle.test_retrieval_in_sandbox -v
 ```
 
 It uses scripted model responses and only the local searches, so it costs nothing.

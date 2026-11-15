@@ -2,7 +2,7 @@ name: tests
 on:
   pull_request:
   push:
-    branches: [main, 'upgrade/**']
+    branches: [main, dev, 'upgrade/**']
 permissions:
   contents: read
 jobs:
@@ -56,3 +56,13 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           systemd-run --user --wait --pipe --quiet true
           cargo test --locked --manifest-path harness/Cargo.toml --test beam_surface --test lake_verifier -- --ignored --nocapture
+  checks:
+    if: always()
+    needs: [regression, native-beam]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every test job to pass
+        env:
+          REGRESSION: ${{ needs.regression.result }}
+          NATIVE_BEAM: ${{ needs.native-beam.result }}
+        run: test "$REGRESSION" = success && test "$NATIVE_BEAM" = success
