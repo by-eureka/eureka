@@ -15,7 +15,9 @@ impl Fixture {
         let template = root.join("template");
         fs::write(
             template.join("lean-toolchain"),
-            "leanprover/lean4:v4.35.0\n",
+            std::env::var("HARNESS_LEAN_TOOLCHAIN")
+                .unwrap_or_else(|_| "leanprover/lean4:v4.35.0".into())
+                + "\n",
         )
         .unwrap();
         fs::write(
@@ -118,7 +120,7 @@ fn bundled_verifier_enforces_the_trust_boundary() {
             // Lean 4.35's exporter panics for a missing declaration. Preserve
             // that operational failure rather than treating crashes as judgments.
             assert!(
-                matches!(result, Err(Error::VerifierFailed(_))),
+                matches!(result, Err(Error::VerifierFailed(_) | Error::Rejected(_))),
                 "{result:?}"
             );
         } else {

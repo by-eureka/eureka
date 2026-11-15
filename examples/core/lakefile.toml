@@ -1,0 +1,4 @@
+name = "proof_core"
+
+[[lean_lib]]
+name = "Proofs"

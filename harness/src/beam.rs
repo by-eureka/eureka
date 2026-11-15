@@ -18,12 +18,7 @@ use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
 /// Tools that take a workspace but no Lean/Lake operation; not offered to the model.
-const HIDDEN: &[&str] = &[
-    "beam_version",
-    "beam_stats",
-    "beam_feedback_report",
-    "lean_drop_workspace",
-];
+const HIDDEN: &[&str] = &["beam_version", "beam_stats", "beam_feedback_report"];
 
 #[derive(Clone, Debug)]
 pub struct ToolSpec {
@@ -70,6 +65,14 @@ impl Beam {
             tools,
             workspace,
         })
+    }
+
+    /// Common workflow rules moved out of per-tool descriptions in Beam 0.2.
+    pub fn instructions(&self) -> String {
+        self.service
+            .peer_info()
+            .and_then(|info| info.instructions.clone())
+            .unwrap_or_default()
     }
 
     pub fn tools(&self) -> &[ToolSpec] {
@@ -146,7 +149,7 @@ fn render(result: &Value) -> Result<String> {
 }
 
 /// A Beam server from a host install, for tests and local experiments.
-/// Production uses PoolConfig::mcp, which runs the server inside the sandbox.
+/// Production uses runtime::mcp, which runs the server inside the sandbox.
 pub fn host_server(binary: &Path) -> tokio::process::Command {
     tokio::process::Command::new(binary)
 }

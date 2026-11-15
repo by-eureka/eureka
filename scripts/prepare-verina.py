@@ -4,7 +4,7 @@
     python3 scripts/prepare-verina.py /path/to/verina runs/verina-batch
 
 Use a pinned reference checkout. Remove the marked proof and proof_aux contents, then apply
-small, recorded library compatibility edits for the harness's Lean 4.33 toolchain. Reference
+small, recorded library compatibility edits for the harness's Lean 4.35 toolchain. Reference
 proofs stay outside the templates, which are the only files mounted in prover sandboxes.
 """
 import argparse

@@ -60,7 +60,7 @@ def prepare(reference, output):
         text, answers = proof_input(raw, path.stem)
         if not text.startswith('import Mathlib\n'):
             raise ValueError(f'{path.stem}: unexpected import header')
-        # Keep the prepared pool's Lake configuration identical. This local
+        # Keep the prepared runtime's Lake configuration identical. This local
         # option supplies upstream's package setting without changing the snapshot.
         text = text.replace('import Mathlib\n',
                             'import Mathlib\n\nset_option autoImplicit false\n', 1)

@@ -1,0 +1,2 @@
+-- Root module of the `Proofs` library. Challenge and Solution are built as
+-- separate modules by the verifier; importing both here would clash.

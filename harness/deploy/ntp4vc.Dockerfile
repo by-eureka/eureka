@@ -11,4 +11,4 @@ import json
 import subprocess
 subprocess.run(["lake", "build", *json.load(open('/tmp/ntp-modules.json'))], check=True)
 PY
-WORKDIR /opt/beam
+WORKDIR /project

@@ -1,0 +1,13 @@
+{
+    "challenge_module": "Proofs.Challenge",
+    "solution_module": "Proofs.Solution",
+    "theorem_names": [
+        "add_comm_nat",
+        "two_mul_eq"
+    ],
+    "permitted_axioms": [
+        "propext",
+        "Quot.sound",
+        "Classical.choice"
+    ]
+}

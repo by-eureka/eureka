@@ -9,8 +9,8 @@
 //! `<pool>/attempts/<id>/`, which no sandbox can see.
 use crate::agent::{self, AgentConfig, Outcome};
 use crate::beam::{Beam, ExtraServer, ToolSpec};
-use crate::pool::PoolConfig;
 use crate::responses::{Client, Usage};
+use crate::runtime;
 use crate::sandbox::{Sandbox, SandboxSpec, WORK};
 use crate::tools::{
     BeamTool, Ctx, ExtraTool, Finish, LeanCheck, ReadFile, Role, Shell, Submit, Tool, WriteFile,
@@ -32,7 +32,6 @@ pub struct Harness {
     pub task: Task,
     pub client: Client,
     pub sandbox: SandboxSpec,
-    pub pool: PoolConfig,
     pub trace: Arc<Trace>,
     pub agent: AgentConfig,
     pub instructions: String,
@@ -202,14 +201,18 @@ impl Harness {
             let mut outcome = match async {
                 let s = Arc::new(Sandbox::create(&self.sandbox, &id, &root).await?);
                 sandbox = Some(s.clone());
-                self.pool.attach(&s, &root).await?;
                 let beam = tokio::time::timeout(
                     Duration::from_secs(30),
-                    Beam::spawn(self.pool.mcp(&s), WORK),
+                    Beam::spawn(runtime::mcp(&s), WORK),
                 )
                 .await
                 .context("Beam startup timeout")??;
                 let beam = Arc::new(beam);
+                // Resolve imports before the first paid request. Source diagnostics
+                // remain available for repair; runtime/setup failures stop startup.
+                beam.call("lean_sync", &json!({"path": self.task.target().as_str()}))
+                    .await
+                    .context("initial Lean workspace setup")?;
                 let ctx = Ctx {
                     id: id.clone(),
                     role,
@@ -249,10 +252,11 @@ impl Harness {
                         }));
                     }
                 }
+                let instructions = format!("{}\n\n{}", self.instructions, beam.instructions());
                 let outcome = agent::run(
                     &self.client,
                     &self.agent,
-                    &self.instructions,
+                    &instructions,
                     &prompt,
                     &tools,
                     &ctx,

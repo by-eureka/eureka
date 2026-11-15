@@ -23,5 +23,5 @@ fi
 
 mkdir -p "$out/store"
 "$HARNESS" --template "$problem" --store "$out/store" \
-    --packages "$PACKAGES" --pool-token-file "$POOL_TOKEN_FILE" \
+    --packages "$PACKAGES" \
     --trace "$out/trace.jsonl" --verify-only "$candidate"

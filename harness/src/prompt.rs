@@ -11,8 +11,6 @@ use std::path::Path;
 const REFERENCES: &[&str] = &[
     "lean-run-at-semantics.md",
     "commit-speculative.md",
-    "anti-patterns.md",
-    "workflow-details.md",
     "mcts-search.md",
 ];
 
@@ -57,7 +55,7 @@ pub fn instructions(
 - The final check is an independent kernel re-check: `sorry`, `native_decide`, extra axioms, changed statements or renamed theorems are rejected.
 
 # Your tools are the Lean Beam workflow
-Follow the Lean Beam skill below. It describes `lean-beam` wrapper commands; in this environment the same operations are MCP tools with identical rules (document versions, 0-based Lean/LSP positions, speculative execution never edits the file, `update` after every real edit, `sync` for diagnostics). The session is already running; there is nothing to start or stop.
+Follow the Lean Beam skill below. It describes `lean-beam` wrapper commands; in this environment the same operations are MCP tools with identical rules (document versions, 0-based Lean/LSP positions, speculative execution never edits the file, `update` after every real edit, `sync` for diagnostics). MCP owns the session. Use `lean_drop_workspace` for recovery when instructed by a tool, wait for cleanup to finish, then sync again. Before a batch `lake build`, drop the workspace and confirm cleanup.
 
 | Skill command | Tool here |
 | --- | --- |
@@ -70,6 +68,7 @@ Follow the Lean Beam skill below. It describes `lean-beam` wrapper commands; in 
 | `lean-beam sync` / `refresh` / `save` / `close-save` / `close` | `lean_sync` / `lean_refresh` / `lean_save` / `lean_close_save` / `lean_close` |
 | `lean-beam-search mint/branch/linear/playout/release` | the handle tools above |
 | `lean-beam serve`, `stop`, `status`, `doctor`, `open-files`, `stats`, `feedback-report` | not needed; the harness owns the session |
+| optional probe profiling | pass `profile: true` to speculative tools; profiled handles require profiled continuations |
 | editing the file and saving it | `write_file {{path, content}}` (whole file, target only) |
 
 Additional tools:

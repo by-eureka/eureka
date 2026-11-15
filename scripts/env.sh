@@ -1,8 +1,7 @@
 # Shared settings for the scripts in this directory; source it, don't run it.
 # Override any of these by setting them in your environment.
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-PACKAGES=${PACKAGES:-$ROOT/pool-packages}
-POOL_TOKEN_FILE=${POOL_TOKEN_FILE:-$ROOT/pool.token}
+PACKAGES=${PACKAGES:-$ROOT/lean-packages}
 HARNESS=$ROOT/harness/target/debug/harness
 # User services skip shell startup files. Verification needs elan's Lake and Bubblewrap.
 export PATH="${ELAN_HOME:-$HOME/.elan}/bin:$HOME/.local/bin:$PATH"
