@@ -84,11 +84,15 @@ def create(state, root, image, memory, cpus):
     (state / "pod.json").write_text(json.dumps({"id": ident, "description": description, "image": image}) + "\n")
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-C", "", "-N", "", "-f", str(state/"identity")], check=True)
     key = " ".join((state / "identity.pub").read_text().split()[:2])
+    resources = {"cpu_request": cpus, "cpu_limit": cpus, "mem_request": memory, "mem_limit": memory}
+    if scratch := os.getenv("TAPIS_SCRATCH_MIB"):
+        resources["ephemeral_storage_request"] = int(scratch)
+        resources["ephemeral_storage_limit"] = int(scratch)
     template = {"pod_id": ident, "description": description, "image": image,
                 "volume_mounts": {"/etc/ssh/eureka_authorized_keys": {
                     "type": "ephemeral", "config_content": "restrict " + key + "\n",
-                    "config_permissions": "0444"}},
-                "resources": {"cpu_request": cpus, "cpu_limit": cpus, "mem_request": memory, "mem_limit": memory},
+                    "config_permissions": "0444", "config_update_mode": "once"}},
+                "resources": resources,
                 "networking": {"default": {"protocol": "tcp", "port": 2222}},
                 "time_to_stop_default": int(os.getenv("TAPIS_TIME_TO_STOP", "3600"))}
     path = "/" + ident
@@ -107,7 +111,7 @@ def create(state, root, image, memory, cpus):
                     log.write(json.dumps(dict(seconds=round(time.monotonic() - started, 2),
                                               status=status, phase=progress[1], message=progress[2])) + "\n")
                 last_status = progress
-            if status in {"STOPPED", "COMPLETE", "ERROR"}:
+            if row is None or status in {"STOPPED", "COMPLETE", "ERROR"}:
                 raise RuntimeError(f"{ident} stopped during startup ({status}); see {state}/startup.jsonl")
             if status == "AVAILABLE":
                 # Bootstrap the host key through the authenticated Tapis control plane.

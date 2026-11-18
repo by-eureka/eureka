@@ -106,9 +106,11 @@ export TAPIS_TOKEN_FILE=/private/path/tacc-access.token
 export API_KEY_FILE=/private/path/deepseek.key
 export IMAGE=debganguly/infinilean:YOUR_RELEASE_TAG
 export LOGPROBS=false  # DeepSeek can omit probabilities for tool calls
-scripts/run.sh examples/simple runs/tapis-example --tapis-backend "$PWD/scripts/tapis-pod.py"
+export TAPIS_SCRATCH_MIB=4096
+scripts/run.sh examples/simple runs/tapis-example \
+  --tapis-backend "$PWD/scripts/tapis-pod.py" --cpus 1 --memory-mib 8192
 ```
 
-For independent problems, start one run per template with a distinct output directory. Pass `--agents 2` to give two leads the same problem. Each lead or helper creates a separate pod and uses one pod for its whole attempt, including every Beam call. A helper receives a copy of its parent's current target and returns its candidate and notes through the controller. Choose concurrency and per-pod `--cpus` and `--memory-mib` for your TACC allocation.
+For independent problems, start one run per template with a distinct output directory. Pass `--agents 2` to give two leads the same problem. Each lead or helper creates a separate pod and uses one pod for its whole attempt, including every Beam call. A helper receives a copy of its parent's current target and returns its candidate and notes through the controller. Choose concurrency and per-pod `--cpus` and `--memory-mib` for your TACC allocation. Set `TAPIS_SCRATCH_MIB` to request and limit writable ephemeral storage per pod in MiB. TACC's nodes also need room to pull and unpack the image.
 
 Each attempt records its pod ID and runtime identity under its host artifact directory in `tapis/`. The controller captures the candidate, deletes the pod, and verifies the captured bytes against a fresh trusted template. Helpers return their candidate to the lead. A completed controller cleanup leaves a `deleted` marker. If the controller is lost, `TAPIS_TIME_TO_STOP` bounds the pod lifetime from startup (default 3600 seconds). Remove an orphan from its recorded attempt directory with `scripts/tapis-pod.py delete /path/to/attempt/tapis`. An expired TACC token must be refreshed for cleanup. A pod timeout or loss of its ephemeral storage can lose edits that have not yet been returned.
