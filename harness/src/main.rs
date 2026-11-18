@@ -44,6 +44,9 @@ struct Cli {
     /// Image containing the Lean SDK and native Beam runtime.
     #[arg(long, default_value = "eureka-lean:dev")]
     image: String,
+    /// Execute attempts in TACC Pods using the supplied trusted scripts/tapis-pod.py.
+    #[arg(long)]
+    tapis_backend: Option<PathBuf>,
     /// Docker network; use an internal network to enable optional retrieval.
     #[arg(long, default_value = "none")]
     network: String,
@@ -151,7 +154,25 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     anyhow::ensure!(cli.agents > 0, "--agents must be positive");
-    let image = runtime::validate_image(&cli.image, &template).await?;
+    let tapis = cli
+        .tapis_backend
+        .as_ref()
+        .map(|backend| -> Result<_> {
+            anyhow::ensure!(
+                cli.network == "none",
+                "custom Docker networks are local to the Docker backend"
+            );
+            Ok(harness::tapis::TapisSpec {
+                backend: backend.canonicalize()?,
+                artifacts: artifacts.clone(),
+            })
+        })
+        .transpose()?;
+    let image = if tapis.is_some() {
+        cli.image.clone()
+    } else {
+        runtime::validate_image(&cli.image, &template).await?
+    };
     // A seed only sets the starting file; the conversation starts fresh.
     let seed = cli.seed.as_ref().map(std::fs::read_to_string).transpose()?;
     let api_key = std::env::var("DEEPSEEK_API_KEY")
@@ -173,6 +194,7 @@ async fn main() -> Result<()> {
         client,
         sandbox: SandboxSpec {
             image,
+            tapis,
             network: cli.network,
             packages,
             run_id,

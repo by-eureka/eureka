@@ -23,6 +23,7 @@ pub mod responses;
 pub mod runtime;
 pub mod sandbox;
 pub mod search;
+pub mod tapis;
 pub mod tools;
 pub mod trace;
 pub mod verify;

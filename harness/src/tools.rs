@@ -31,7 +31,7 @@ pub enum Role {
 }
 
 /// Per-attempt context shared by all tools.
-/// `root` is the host directory mounted at `/work`.
+/// `root` is the controller-side attempt. File tools use the active sandbox workspace.
 pub struct Ctx {
     pub id: String,
     pub role: Role,
@@ -153,7 +153,7 @@ impl Tool for ReadFile {
         Box::pin(async move {
             let rel = RelPath::new(str_arg(&args, "path")?)?;
             // read_beneath won't follow symlinks out of the root.
-            let text = String::from_utf8(worktrees::read_beneath(&ctx.root, &rel, MAX_READ)?)?;
+            let text = String::from_utf8(ctx.sandbox.read_file(&ctx.root, &rel, MAX_READ).await?)?;
             Ok(truncate(
                 text.lines()
                     .enumerate()
@@ -191,7 +191,9 @@ impl Tool for WriteFile {
             if content.len() > MAX_READ as usize {
                 bail!("target exceeds {MAX_READ} bytes");
             }
-            worktrees::replace_beneath(&ctx.root, &ctx.target, content.as_bytes())?;
+            ctx.sandbox
+                .write_file(&ctx.root, &ctx.target, content.as_bytes())
+                .await?;
             Ok(format!("wrote {} bytes to {rel}", content.len()))
         })
     }
@@ -274,8 +276,11 @@ impl Tool for LeanCheck {
                 bail!("at most 32 commands per lean_check");
             }
             let path = ctx.target.as_str();
-            let source =
-                String::from_utf8(worktrees::read_beneath(&ctx.root, &ctx.target, MAX_READ)?)?;
+            let source = String::from_utf8(
+                ctx.sandbox
+                    .read_file(&ctx.root, &ctx.target, MAX_READ)
+                    .await?,
+            )?;
             // Command-mode probes need a command start. The start of the last
             // top-level declaration sees everything declared before it.
             let line = command_line(&source);

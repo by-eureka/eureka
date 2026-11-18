@@ -1,6 +1,6 @@
 # Native Lean and Beam runtime
 
-Each attempt runs its own Beam MCP server inside a Docker container. The image contains a complete Lean SDK and a Beam runtime built for that exact compiler. The harness keeps model credentials on the host, mounts dependencies read-only, and gives each attempt a private writable project. Containers use `--network none` by default.
+By default the harness starts a local Docker container for each attempt. For remote execution it can create a [TACC pod per attempt](#tacc-proof-pods). Each container runs its own Beam MCP server and has a private writable Lean project with read-only prepared dependencies. Model credentials stay on the controller. Local Docker containers use `--network none` by default.
 
 This runtime belongs to the `dev` channel. Keep it in a separate checkout from
 stable `main`; see [development and promotion](../../CONTRIBUTING.md).
@@ -83,3 +83,34 @@ python3 scripts/smoke-model.py --packages "$PWD/lean-packages-dev" --output runs
 This checks arithmetic and Mathlib proofs with `deepseek-flash`, at most 12 turns each. It explicitly disables logprobs because DeepSeek tool-only responses can omit them. Normal runs retain the strict logprob default. Results and proof artifacts are saved under the chosen output directory; credentials are not saved.
 
 Pass `--template /path/to/template` with the corresponding image and packages to check another compiler. See [recorded migration validation](VALIDATION.md) for versions, outcomes and limits.
+
+## TACC proof pods
+
+The Rust controller and independent verifier run on the operator's machine. Each lead and each helper gets its own TACC pod. The pod runs the upstream Beam MCP server, shell commands and a private Lean workspace. The controller opens an SSH command channel for each MCP server and keeps it open across tool calls. Tapis routes this SSH transport using a TLS hostname on port 443. The controller learns the fresh SSH host key through the authenticated Tapis control API. Only its per-attempt public key is mounted in the pod.
+
+Build a new x86 image from a dev checkout with its pinned submodule. Choose an unused release tag in the allowlisted Docker Hub repository.
+
+```bash
+export BEAM_REV="$(git -C lean-beam rev-parse HEAD)"
+export IMAGE=debganguly/infinilean:YOUR_NEW_TAG
+docker buildx bake -f harness/deploy/tapis/bake.hcl pod --load
+docker push "$IMAGE"
+```
+
+The build contexts admit only the dev template, the SDK Dockerfile and the pod entrypoint. The worker runs as an unprivileged user and its prepared Lean and Mathlib files are owned by root. Proof commands inherit a syscall filter that prevents opening internet sockets. The optional Docker retrieval network is available with the Docker backend.
+
+On the controller, prepare the matching host packages and verifier as described above. The transport also requires Python 3, OpenSSH client tools, OpenSSL, tar, and API access to the TACC Pods service. The two credential files should be private to the controller account.
+
+```bash
+export TAPIS_TOKEN_FILE=/private/path/tacc-access.token
+export API_KEY_FILE=/private/path/deepseek.key
+export IMAGE=debganguly/infinilean:YOUR_RELEASE_TAG
+export LOGPROBS=false  # DeepSeek can omit probabilities for tool calls
+export TAPIS_SCRATCH_MIB=4096
+scripts/run.sh examples/simple runs/tapis-example \
+  --tapis-backend "$PWD/scripts/tapis-pod.py" --cpus 1 --memory-mib 8192
+```
+
+For independent problems, start one run per template with a distinct output directory. Pass `--agents 2` to give two leads the same problem. Each lead or helper creates a separate pod and uses one pod for its whole attempt, including every Beam call. A helper receives a copy of its parent's current target and returns its candidate and notes through the controller. Choose concurrency and per-pod `--cpus` and `--memory-mib` for your TACC allocation. Set `TAPIS_SCRATCH_MIB` to request and limit writable ephemeral storage per pod in MiB. TACC's nodes also need room to pull and unpack the image.
+
+Each attempt records its pod ID and runtime identity under its host artifact directory in `tapis/`. The controller captures the candidate, deletes the pod, and verifies the captured bytes against a fresh trusted template. Helpers return their candidate to the lead. A completed controller cleanup leaves a `deleted` marker. If the controller is lost, `TAPIS_TIME_TO_STOP` bounds the pod lifetime from startup (default 3600 seconds). Remove an orphan from its recorded attempt directory with `scripts/tapis-pod.py delete /path/to/attempt/tapis`. An expired TACC token must be refreshed for cleanup. A pod timeout or loss of its ephemeral storage can lose edits that have not yet been returned.

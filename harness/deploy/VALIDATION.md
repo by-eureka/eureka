@@ -107,3 +107,34 @@ Lean 4.35's exporter can panic on a missing configured declaration. That remains
 an operational failure, with a bounded retry and no publication. The retired
 fork's distributed workers and Tapis attachment protocol are not restored by
 the native migration. Existing proof sources can be ported to a fresh template.
+
+## TACC two-pod run, 2026-11-18
+
+The host ran the Rust harness, called DeepSeek (`deepseek-flash`), and independently verified the submitted Lean file. The lead on `savanna-worker-25` proved `2 * n = n + n`. It spawned one helper on `savanna-worker-14` to prove `0 ≤ x ^ 2` over the reals, collected the helper's target and note, and submitted both proofs. The Lean default kernel accepted the combined file. TACC subsequently returned HTTP 404 for both pod IDs.
+
+Each worker ran upstream Lean Beam `86d26a9a43da` with Lean 4.35.0 on x86-64. Each received 1 CPU, 8192 MiB of memory and 4096 MiB of requested temporary storage. The lead was ready after 236 seconds and the helper after 210 seconds, including image pulls. Separate worker probes wrote the same scratch pathname with different contents and read their own values back. Both proof processes ran as UID 11001, had read-only Mathlib files, rejected outbound IP socket creation, and had no model or tenant credential in the command environment.
+
+An earlier cold pull encountered a Kubernetes node eviction for disk pressure. A subsequent start on that pod ID had no new Kubernetes scheduling event and was stopped. The successful run used a fixed public SSH key ConfigMap with `config_update_mode=once` for each attempt. The run exercises two simultaneous workers. Larger tenant capacity and warm-start latency have not been measured.
+
+The published image is `debganguly/infinilean:eureka-dev-7b9644c-pods-20261118` at digest `sha256:a16403e14618903b82e0161765b29cb33554533ee71d9b792ea515ef1aec2b4f`. All seven image layers, the configuration and the build history were checked for the supplied credentials before publication. [Docker Hub tag](https://hub.docker.com/r/debganguly/infinilean/tags?name=eureka-dev-7b9644c-pods-20261118)
+
+## TACC proof with the default prompt, 2026-11-18
+
+DeepSeek Flash received the harness's default proof prompt and one theorem. Helper tools were available. The trace recorded eight model turns, one lead pod and zero helper spawns. The host verifier accepted this submitted proof, and TACC returned HTTP 404 for the pod after cleanup.
+
+```lean
+import Mathlib.Tactic
+
+namespace StudentProof
+
+theorem sum_first_odds (n : ℕ) : (Finset.range n).sum (fun k ↦ 2 * k + 1) = n ^ 2 := by
+  induction n with
+  | zero => simp
+  | succ n ih =>
+    rw [Finset.sum_range_succ, ih]
+    ring
+
+end StudentProof
+```
+
+The pod landed on the same worker as the earlier helper. Kubernetes reported an image pull of 0.668 seconds for the same image digest. Backend provisioning took 79.4 seconds. Measured from attempt start, the first model call began at 169.3 seconds and the verified run finished at 242.5 seconds.

@@ -30,7 +30,10 @@ pub(crate) async fn compact(
 ) -> Result<Vec<Item>> {
     let dir = ctx.artifacts.join(format!("compaction-{number:04}"));
     std::fs::create_dir(&dir)?;
-    let target = worktrees::read_beneath(&ctx.root, &ctx.target, 4 * 1024 * 1024)?;
+    let target = ctx
+        .sandbox
+        .read_file(&ctx.root, &ctx.target, 4 * 1024 * 1024)
+        .await?;
     artifact(&dir.join("candidate.lean"), &target)?;
     if capture {
         artifact(

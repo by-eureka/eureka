@@ -45,6 +45,7 @@ impl Fixture {
     fn spec(&self) -> SandboxSpec {
         SandboxSpec {
             image: self.image.clone(),
+            tapis: None,
             network: self.network.clone(),
             packages: self.dir.join("packages"),
             run_id: self.network.clone(),
