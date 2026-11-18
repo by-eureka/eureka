@@ -189,6 +189,51 @@ class Lifecycle(unittest.TestCase):
                     else:
                         self.assertIn('theorem drafted', source)
 
+    def test_review_detects_source_changes_before_reporting(self):
+        self.args[self.args.index('--template') + 1] = str(ROOT/'examples/core')
+
+        def respond(_):
+            source, = self.dir.glob('pool-*/scratch/*/project/Proofs/Solution.lean')
+            source.write_text(PROOF)
+            return [call('finish_report', {'note':'finished reviewing'})]
+        self.server.respond = respond
+        result = self.run_harness('--workflow', 'review')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        record, = self.records()
+        self.assertEqual(record['status'], 'failed')
+        self.assertIn('source changed during read-only workflow', record['detail'])
+        self.assertIsNone(record['candidate'])
+
+    def test_formalization_across_an_import(self):
+        template = self.dir/'template'
+        shutil.copytree(ROOT/'examples/core', template, ignore=shutil.ignore_patterns('.lake', '.beam'))
+        helper, target = 'Proofs/Helper.lean', 'Proofs/Solution.lean'
+        (template/'proof-files.json').write_text(json.dumps([helper, target]))
+        (template/helper).write_text('-- Proposed definitions\n')
+        (template/target).write_text('import Proofs.Helper\n')
+        self.args[self.args.index('--template') + 1] = str(template)
+        phases = iter([
+            [call('write_file', {'path':helper, 'content':'def twice (n : Nat) := n + n'}),
+             call('lean_update', {'path':helper}), call('lean_sync', {'path':helper}),
+             call('lean_save', {'path':helper})],
+            [call('write_file', {'path':target, 'content':'import Proofs.Helper\ntheorem twice_zero : twice 0 = 0 := rfl'}),
+             call('lean_refresh', {'path':target}), call('lean_sync', {'path':target})],
+            [call('finish_report', {'note':'Defined doubling and proved that it preserves zero.'})],
+        ])
+        def respond(body):
+            errors = [i['output'] for i in body['input'] if i.get('type') == 'function_call_output'
+                      and i['output'].startswith('ERROR:')]
+            self.assertFalse(errors, errors)
+            return next(phases)
+        self.server.respond = respond
+        result = self.run_harness('--workflow', 'autoformalize')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record, = self.records()
+        self.assertEqual(record['status'], 'reported')
+        candidate = Path(record['candidate'])
+        self.assertIn('def twice', (candidate/helper).read_text())
+        self.assertIn('theorem twice_zero', (candidate/target).read_text())
+
     def test_missing_packages_stop_before_model_requests(self):
         packages = self.dir / 'empty-packages'
         packages.mkdir()

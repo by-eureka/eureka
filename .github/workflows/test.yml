@@ -90,7 +90,8 @@ jobs:
           RUN mkdir -p /opt/elan/toolchains && ln -s /opt/lean /opt/elan/toolchains/leanprover--lean4---v4.35.0
           DOCKERFILE
           cargo build --locked --manifest-path harness/Cargo.toml
-          python3 harness/tests/lifecycle.py -v Lifecycle.test_workflow_guides_and_outcomes
+          python3 harness/tests/lifecycle.py -v Lifecycle.test_workflow_guides_and_outcomes \
+            Lifecycle.test_formalization_across_an_import Lifecycle.test_review_detects_source_changes_before_reporting
   checks:
     if: always()
     needs: [regression, native-beam, nix]
