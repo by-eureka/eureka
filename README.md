@@ -144,7 +144,13 @@ echo
 export DEEPSEEK_API_KEY
 ```
 
-Other providers work if they support the `/responses` API. For DeepSeek's own API, use `https://api.deepseek.com` and `deepseek-flash`.
+Other providers work if they support the `/responses` API. For DeepSeek Flash, tool-only turns can omit scored output text. When you want a proof run with this provider, explicitly allow those turns:
+
+```bash
+MODEL=deepseek-flash LOGPROBS=false scripts/run.sh runs/problem runs/mine
+```
+
+The default endpoint is `https://api.deepseek.com`. Runs that require token scores retain the strict default.
 
 Start the run, using the packages extracted from your runtime image.
 Use a new `RUN` directory each time. The harness runs under `nohup`, so closing the terminal won't stop it:

@@ -94,7 +94,7 @@ def prepare(bench, repo, ids, output):
         selector = " ".join(upstream_toolchain.splitlines())
         files["Proofs/Challenge.lean"] = (
             f"-- VeriSoftBench replays these proofs on {selector}. This workspace uses {active_toolchain}.\n"
-            "-- Prefer lemma names and tactics already used by the original modules.\n" + imports
+            "-- Fill only the selected holes. Preserve surrounding proofs and their original lemma names, including deprecated aliases.\n" + imports
         )
     files["Proofs/Solution.lean"] = imports
     files["Proofs.lean"] = "import Proofs.Solution\n"
