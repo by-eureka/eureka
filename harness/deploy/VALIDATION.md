@@ -117,3 +117,24 @@ Each worker ran upstream Lean Beam `86d26a9a43da` with Lean 4.35.0 on x86-64. Ea
 An earlier cold pull encountered a Kubernetes node eviction for disk pressure. A subsequent start on that pod ID had no new Kubernetes scheduling event and was stopped. The successful run used a fixed public SSH key ConfigMap with `config_update_mode=once` for each attempt. The run exercises two simultaneous workers. Larger tenant capacity and warm-start latency have not been measured.
 
 The published image is `debganguly/infinilean:eureka-dev-7b9644c-pods-20261118` at digest `sha256:a16403e14618903b82e0161765b29cb33554533ee71d9b792ea515ef1aec2b4f`. All seven image layers, the configuration and the build history were checked for the supplied credentials before publication. [Docker Hub tag](https://hub.docker.com/r/debganguly/infinilean/tags?name=eureka-dev-7b9644c-pods-20261118)
+
+## TACC proof with the default prompt, 2026-11-18
+
+DeepSeek Flash received the harness's default proof prompt and one theorem. Helper tools were available. The trace recorded eight model turns, one lead pod and zero helper spawns. The host verifier accepted this submitted proof, and TACC returned HTTP 404 for the pod after cleanup.
+
+```lean
+import Mathlib.Tactic
+
+namespace StudentProof
+
+theorem sum_first_odds (n : ℕ) : (Finset.range n).sum (fun k ↦ 2 * k + 1) = n ^ 2 := by
+  induction n with
+  | zero => simp
+  | succ n ih =>
+    rw [Finset.sum_range_succ, ih]
+    ring
+
+end StudentProof
+```
+
+The pod landed on the same worker as the earlier helper. Kubernetes reported an image pull of 0.668 seconds for the same image digest. Backend provisioning took 79.4 seconds. Measured from attempt start, the first model call began at 169.3 seconds and the verified run finished at 242.5 seconds.
