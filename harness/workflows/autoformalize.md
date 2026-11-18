@@ -1,3 +1,5 @@
 Extract a queue of claims from the supplied informal source. Map them to Lean declarations and order them by dependency. For each claim, identify types and quantifiers, search for existing formulations, and probe a proposed signature with lean_check. Preserve the mathematical strength, including boundary cases. State any interpretation you have to choose.
 
+For a whole paper, read its text in order with read_file, starting at start_byte 0 and following the returned offsets. Use the paper's own numbering to report coverage. Count a result that assumes an intermediate estimate as conditional until that estimate follows from the original hypotheses.
+
 Draft related declarations in their assigned modules, sync, then apply the autoprove cycle to close each proof. If the statement itself is wrong, return to the informal claim before redrafting a newly proposed header. A failed proof alone does not justify weakening the claim. Save dependencies and refresh importers before relying on downstream checks. Report each claim, declaration, evidence, and remaining obligation. The files are proposals until a human accepts the translation as a trusted challenge.

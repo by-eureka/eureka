@@ -171,12 +171,34 @@ impl Tool for ReadGuide {
 
 pub struct ReadFile;
 
+fn file_page(text: &str, offset: &Value) -> Result<String> {
+    let start = offset
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok())
+        .context("start_byte must be a nonnegative integer")?;
+    anyhow::ensure!(
+        text.is_char_boundary(start),
+        "start_byte must be a UTF-8 boundary within the file"
+    );
+    // Leave room for the continuation marker, including when a line spans multiple pages.
+    let end = text.floor_char_boundary(start.saturating_add(MAX_OUTPUT - 128).min(text.len()));
+    let page = &text[start..end];
+    if end == text.len() {
+        Ok(format!("[end of file]\n{page}"))
+    } else {
+        Ok(format!("[next start_byte={end}]\n{page}"))
+    }
+}
+
 impl Tool for ReadFile {
     fn spec(&self) -> ToolSpec {
         spec(
             "read_file",
-            "Read a file in the project. Lines are numbered from 0 to match Lean/LSP positions.",
-            json!({"type": "object", "properties": {"path": {"type": "string", "description": "Path relative to the project root."}}, "required": ["path"], "additionalProperties": false}),
+            "Read a project file with 0-based line numbers. For a long source, set start_byte to 0, then follow each next start_byte to read consecutive pages of raw text.",
+            json!({"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path relative to the project root."},
+                "start_byte": {"type": "integer", "minimum": 0, "description": "Byte offset for a plain-text page, starting at 0."}
+            }, "required": ["path"], "additionalProperties": false}),
             true,
         )
     }
@@ -185,6 +207,9 @@ impl Tool for ReadFile {
             let rel = RelPath::new(str_arg(&args, "path")?)?;
             // read_beneath won't follow symlinks out of the root.
             let text = String::from_utf8(ctx.sandbox.read_file(&ctx.root, &rel, MAX_READ).await?)?;
+            if let Some(offset) = args.get("start_byte") {
+                return file_page(&text, offset);
+            }
             Ok(truncate(
                 text.lines()
                     .enumerate()

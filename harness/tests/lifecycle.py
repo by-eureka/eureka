@@ -204,6 +204,34 @@ class Lifecycle(unittest.TestCase):
         self.assertIn('source changed during read-only workflow', record['detail'])
         self.assertIsNone(record['candidate'])
 
+    def test_read_paper_in_consecutive_pages(self):
+        template = self.dir/'template'
+        shutil.copytree(ROOT/'examples/core', template, ignore=shutil.ignore_patterns('.lake', '.beam'))
+        paper = ('幾何∇α⋅' * 14000) + '\r\nEnd.\n'
+        (template/'Paper.txt').write_bytes(paper.encode())
+        self.args[self.args.index('--template') + 1] = str(template)
+        pages = []
+
+        def respond(body):
+            outputs = [i['output'] for i in body['input'] if i.get('type') == 'function_call_output']
+            offset = 0
+            if outputs:
+                marker, page = outputs[-1].split('\n', 1)
+                pages.append(page)
+                if marker == '[end of file]':
+                    self.assertGreater(len(pages), 1)
+                    self.assertEqual(''.join(pages), paper)
+                    return [call('finish_report', {'note': 'Read the complete source.'})]
+                self.assertTrue(marker.startswith('[next start_byte=') and marker.endswith(']'), marker)
+                offset = int(marker[len('[next start_byte='):-1])
+                self.assertEqual(offset, sum(len(s.encode()) for s in pages))
+            return [call('read_file', {'path': 'Paper.txt', 'start_byte': offset})]
+
+        self.server.respond = respond
+        result = self.run_harness('--workflow', 'review')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.records()[0]['status'], 'reported')
+
     def test_formalization_across_an_import(self):
         template = self.dir/'template'
         shutil.copytree(ROOT/'examples/core', template, ignore=shutil.ignore_patterns('.lake', '.beam'))
