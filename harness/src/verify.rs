@@ -256,6 +256,10 @@ impl LeanVerifier {
                 "--ro-bind-try",
                 "/lib64",
                 "/lib64",
+                // Nix's elan links the SDK's ELF loader and libraries into this store.
+                "--ro-bind-try",
+                "/nix/store",
+                "/nix/store",
                 "--dev",
                 "/dev",
                 "--proc",
