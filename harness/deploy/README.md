@@ -82,7 +82,7 @@ python3 scripts/smoke-model.py --packages "$PWD/lean-packages-dev" --output runs
 
 This checks arithmetic and Mathlib proofs with `deepseek-flash`, at most 12 turns each. It explicitly disables logprobs because DeepSeek tool-only responses can omit them. Normal runs retain the strict logprob default. Results and proof artifacts are saved under the chosen output directory; credentials are not saved.
 
-Pass `--template /path/to/template` with the corresponding image and packages to check another compiler. See [recorded migration validation](VALIDATION.md) for versions, outcomes and limits.
+Pass `--template /path/to/template` with the corresponding image and packages to check another compiler.
 
 ## TACC proof pods
 
@@ -104,7 +104,7 @@ On the controller, prepare the matching host packages and verifier as described 
 ```bash
 export TAPIS_TOKEN_FILE=/private/path/tacc-access.token
 export API_KEY_FILE=/private/path/deepseek.key
-export IMAGE=debganguly/infinilean:YOUR_RELEASE_TAG
+export IMAGE=debganguly/infinilean:eureka-dev-7b9644c-pods-20261118
 export LOGPROBS=false  # DeepSeek can omit probabilities for tool calls
 export TAPIS_SCRATCH_MIB=4096
 scripts/run.sh examples/simple runs/tapis-example \
