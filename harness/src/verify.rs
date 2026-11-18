@@ -74,6 +74,74 @@ fn validate_config(template: &Path, text: &str) -> anyhow::Result<Config> {
     Ok(config)
 }
 
+/// Derive the negation from Lean's type of the original trusted constant,
+/// including its implicit and explicit binders. The model supplies only a proof.
+pub fn refutation_template(
+    template: &Path,
+    requested: Option<&str>,
+) -> anyhow::Result<tempfile::TempDir> {
+    let scratch = tempfile::tempdir()?;
+    let root = scratch.path().join("project");
+    let mut options = worktrees::Options::default();
+    options.excluded_names.insert(".beam".into());
+    worktrees::copy_template(template, &root, &options)?;
+    let config_file = root.join("config.json");
+    let config_text = std::fs::read_to_string(&config_file)?;
+    let base = validate_config(&root, &config_text)?;
+    let theorem = match (requested, base.theorem_names.as_slice()) {
+        (Some(name), names) if names.iter().any(|n| n == name) => name,
+        (Some(name), _) => anyhow::bail!("unknown configured theorem: {name}"),
+        (None, [only]) => only,
+        _ => anyhow::bail!("select one configured theorem with --refute THEOREM"),
+    };
+    // Quote name components for Lean source. Never splice raw configuration
+    // strings into commands, including import statements.
+    fn quoted(name: &str) -> anyhow::Result<String> {
+        let parts: Vec<_> = name.split('.').collect();
+        anyhow::ensure!(
+            parts.iter().all(|s| !s.is_empty()
+                && !s.contains(['«', '»'])
+                && !s.chars().any(char::is_control)),
+            "unsupported quoted Lean name: {name}"
+        );
+        Ok(parts
+            .iter()
+            .map(|p| format!("«{p}»"))
+            .collect::<Vec<_>>()
+            .join("."))
+    }
+    let prefix = base
+        .challenge_module
+        .rsplit_once('.')
+        .map_or(String::new(), |(p, _)| format!("{p}."));
+    let challenge = format!("{prefix}EurekaRefutationChallenge");
+    let solution = format!("{prefix}EurekaRefutationSolution");
+    let source = format!(
+        "import {}\n\ntheorem EurekaRefutation.refutation : ¬ (type_of% @_root_.{}) := by\n  sorry\n",
+        quoted(&base.challenge_module)?,
+        quoted(theorem)?
+    );
+    let solution_path = solution.replace('.', "/") + ".lean";
+    for module in [&challenge, &solution] {
+        use std::io::Write;
+        let path = root.join(module.replace('.', "/") + ".lean");
+        std::fs::File::create_new(&path)
+            .with_context(|| format!("refutation module collision: {}", path.display()))?
+            .write_all(source.as_bytes())?;
+    }
+    let mut config: serde_json::Value = serde_json::from_str(&config_text)?;
+    config["challenge_module"] = challenge.into();
+    config["solution_module"] = solution.into();
+    config["theorem_names"] = serde_json::json!(["EurekaRefutation.refutation"]);
+    config["definition_names"] = serde_json::json!([]);
+    std::fs::write(config_file, serde_json::to_vec_pretty(&config)?)?;
+    std::fs::write(
+        root.join("proof-files.json"),
+        serde_json::to_vec(&[solution_path])?,
+    )?;
+    Ok(scratch)
+}
+
 fn supported_version(version: &str) -> bool {
     let Some(number) = version.split("version ").nth(1) else {
         return false;

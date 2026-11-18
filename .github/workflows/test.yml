@@ -75,6 +75,22 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           systemd-run --user --wait --pipe --quiet true
           cargo test --locked --manifest-path harness/Cargo.toml --test beam_surface --test lake_verifier -- --ignored --nocapture
+      - name: Exercise all Lean workflows through the Docker harness
+        if: matrix.lean == 'v4.35.0'
+        env:
+          HARNESS_IMAGE: eureka-workflow-test
+          HARNESS_PACKAGES: ${{ runner.temp }}/empty-packages
+        run: |
+          mkdir -p "$HARNESS_PACKAGES"
+          sdk=$(dirname "$(dirname "$HARNESS_BEAM_MCP")")
+          docker build -t "$HARNESS_IMAGE" -f - "$sdk" <<'DOCKERFILE'
+          FROM ubuntu:24.04
+          RUN apt-get update && apt-get install -y --no-install-recommends git libgmp10 libuv1t64 && rm -rf /var/lib/apt/lists/*
+          COPY . /opt/lean
+          RUN mkdir -p /opt/elan/toolchains && ln -s /opt/lean /opt/elan/toolchains/leanprover--lean4---v4.35.0
+          DOCKERFILE
+          cargo build --locked --manifest-path harness/Cargo.toml
+          python3 harness/tests/lifecycle.py -v Lifecycle.test_workflow_guides_and_outcomes
   checks:
     if: always()
     needs: [regression, native-beam, nix]

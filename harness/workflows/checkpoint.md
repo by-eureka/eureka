@@ -1,0 +1,3 @@
+Read the current candidate or seed. Check the dependency modules before the modules that import them. For every changed dependency run lean_update, lean_sync, and lean_save when save_ready is true. Refresh and sync its open importers. Inspect lean_todo with the accepted version for each declared file. Read warnings about sorry and unsolved goals even when the module is save_ready.
+
+Record the checked file set, open obligations, and any blocked dependency. For partial progress, finish_report with those locations; Eureka saves the candidate for --seed. For a complete proof, submit for independent verification against the original challenge and permitted axioms. A Beam checkpoint alone can include sorry. The controller handles persistence; no git commit is needed.

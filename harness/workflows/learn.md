@@ -1,0 +1,3 @@
+Identify what the learner wants to understand: the mathematical idea, a tactic, a library declaration or a next-step hint. Read the exact source and inspect lean_goals before and after a representative tactic. Use lean_hover or lean_check to confirm the relevant type and test the example in its real imports.
+
+Explain the change in hypotheses or goal in the learner's vocabulary. For a hint request give the smallest next move and a question they can answer before revealing the proof. For a worked explanation give the checked Lean fragment and explain why it applies. Cite the actual declaration or tactic position. Keep untested intuition separate from the observed result. Deliver the lesson with finish_report.

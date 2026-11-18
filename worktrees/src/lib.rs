@@ -435,6 +435,13 @@ impl Snapshot {
     }
 }
 
+/// Copy a trusted template into a new directory with the same bounds,
+/// exclusions and symlink policy as attempt creation.
+pub fn copy_template(source: &Path, destination: &Path, options: &Options) -> Result<(), Error> {
+    options.validate()?;
+    Snapshot::capture(source, options)?.materialize(destination, false)
+}
+
 struct Inner {
     run: PathBuf,
     options: Options,

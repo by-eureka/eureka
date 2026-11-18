@@ -21,7 +21,7 @@ import time
 
 STATUS_STYLES = {
     'verified': 'bold green', 'failed': 'bold red', 'cleanup_failed': 'bold red',
-    'rejected': 'red', 'not_submitted': 'yellow', 'finished': 'blue',
+    'rejected': 'red', 'not_submitted': 'yellow', 'finished': 'blue', 'reported': 'blue',
     'unfinished': 'cyan', 'verifying': 'cyan',
 }
 

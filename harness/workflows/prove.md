@@ -1,0 +1,5 @@
+Work one guided proof cycle on the requested declaration. Read its exact binders, local definitions and imports. Run lean_update, then lean_todo on the saved file. A todo with a run_at_position gives a probe anchor. Inspect lean_goals there, including the hypotheses.
+
+Find the nearest existing lemma with lean_workspace_symbols or the available retrieval tools. Confirm its type with lean_check (#check @Qualified.name). Try a direct application and a genuinely different strategy with lean_run_at at the same version. Check success and remaining goals before committing the smallest working edit. Use apply_patch, update and sync. For a “Try this” suggestion, request code actions at the point with lean_todo and inspect the proposed edit before applying it.
+
+If stuck, record file, declaration, goal, strategies tried and the missing fact. Change the intermediate claim, induction variable or library search query before repeating a cycle. When a decision needs the student, finish_report with the checked progress and one specific question. A complete solution can go to submit.

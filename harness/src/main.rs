@@ -11,6 +11,7 @@ use harness::responses::{Client, ModelConfig, headers_from_env};
 use harness::runtime;
 use harness::sandbox::SandboxSpec;
 use harness::search::Harness;
+use harness::workflow::{Guides, Workflow};
 use harness::{prompt, proof_files, trace, verify};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -109,6 +110,12 @@ struct Cli {
     /// Lean Beam skill directory (SKILL.md plus references), used as the workflow.
     #[arg(long, default_value = "lean-beam/skills/lean-beam")]
     beam_skill: PathBuf,
+    /// Select the Lean development workflow. Regular runs prove every configured theorem.
+    #[arg(long, value_enum, default_value = "autoprove")]
+    workflow: Workflow,
+    /// The original configured theorem to negate in a disprove run (required if ambiguous).
+    #[arg(long, value_name = "THEOREM")]
+    refute: Option<String>,
     /// Override the first user message given to each top-level agent.
     #[arg(long)]
     prompt: Option<String>,
@@ -153,13 +160,27 @@ async fn main() -> Result<()> {
     // Catch bad paths, unsupported Lean versions and invalid verification configuration
     // before spending anything on the model.
     let template = std::fs::canonicalize(&cli.template)?;
+    anyhow::ensure!(
+        cli.refute.is_none() || cli.workflow == Workflow::Disprove,
+        "--refute requires --workflow disprove"
+    );
+    let refutation = if cli.workflow == Workflow::Disprove {
+        Some(verify::refutation_template(
+            &template,
+            cli.refute.as_deref(),
+        )?)
+    } else {
+        None
+    };
+    let template = refutation
+        .as_ref()
+        .map_or(template, |dir| dir.path().join("project"));
     let packages = std::fs::canonicalize(&cli.packages)?;
     runtime::validate_packages(&template, &packages)?;
     let mut verifier = verify::LeanVerifier::from_template(&template)?;
     verifier.deps = Some(packages.clone());
     let (primary, additional) =
         proof_files::scope(&template, cli.target.as_deref(), &verifier.challenge_path())?;
-    let primary_name = primary.as_str().to_owned();
     let multi = !additional.is_empty();
     let instructions_files = std::iter::once(&primary)
         .chain(&additional)
@@ -175,9 +196,11 @@ async fn main() -> Result<()> {
     options.excluded_names.insert(".beam".into());
     let verifier = Arc::new(verifier);
     let pool = Pool::create(&template, &cli.store, options, verifier.clone())?;
-    verifier
-        .prepare(&pool)
-        .context("prepare trusted reference before starting attempts")?;
+    if cli.workflow.accepts_proof() || cli.verify_only.is_some() {
+        verifier
+            .prepare(&pool)
+            .context("prepare trusted reference before starting attempts")?;
+    }
     let task = pool.task(primary)?;
     let run_id = pool
         .store()
@@ -249,6 +272,7 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|p| proof_files::load(&task, p))
         .transpose()?;
+    let guides = Arc::new(Guides::load(&cli.beam_skill)?);
     let harness = Arc::new(Harness {
         task,
         client,
@@ -271,20 +295,20 @@ async fn main() -> Result<()> {
             dont_give_up: cli.dont_give_up,
         },
         instructions: {
-            let mut text = prompt::instructions(
+            let mut instructions = prompt::instructions(
                 &template,
-                &primary_name,
                 &instructions_files,
                 &challenge,
-                !cli.no_shell,
-                &cli.beam_skill,
+                cli.workflow,
+                &guides,
             )?;
-            if cli.dont_give_up {
-                // The loop also continues text-only replies; --max-turns still applies.
-                text.push_str("\n\nThis statement is definitely provable as stated. Do not give up and do not end the session without a verified submission: if one approach stalls, try another, split the hard claim among subagents, and keep going.\n");
+            if cli.dont_give_up && !cli.workflow.accepts_report() {
+                instructions.push_str("\nContinue working on the proof until submission or the turn limit. When stuck, change the proof strategy.");
             }
-            text
+            instructions
         },
+        workflow: cli.workflow,
+        guides,
         shell: !cli.no_shell,
         shell_timeout: Duration::from_secs(300),
         stop: CancellationToken::new(),
@@ -300,10 +324,17 @@ async fn main() -> Result<()> {
 
     let prompt = cli.prompt.unwrap_or_else(|| {
         format!(
-            "Prove every theorem listed in config.json across these proof files: {}. Start by reading the files and probing the goals.",
+            "Run the {} workflow on {}. Read the assigned files and use Lean to check your work.",
+            cli.workflow.name(),
             instructions_files
         )
     });
+    trace::artifact(
+        &pool.store().join("workflow.json"),
+        &serde_json::to_vec(&serde_json::json!({
+            "workflow": cli.workflow.name(), "task": prompt
+        }))?,
+    )?;
     let stop = harness.stop.clone();
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let signals = tokio::spawn(async move {
@@ -318,7 +349,7 @@ async fn main() -> Result<()> {
         .await;
     signals.abort();
     match result? {
-        Some(published) => {
+        (Some(published), _) => {
             println!(
                 "VERIFIED {}",
                 if multi {
@@ -331,8 +362,14 @@ async fn main() -> Result<()> {
             println!("{}", published.report()?);
             Ok(())
         }
-        None => {
-            eprintln!("no agent produced a verified proof");
+        (None, reports) if !reports.is_empty() => {
+            for path in reports {
+                println!("REPORT {}", path.display());
+            }
+            Ok(())
+        }
+        _ => {
+            eprintln!("no agent completed the {} workflow", cli.workflow.name());
             std::process::exit(2)
         }
     }

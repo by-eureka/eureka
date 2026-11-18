@@ -14,15 +14,16 @@ use crate::responses::{Client, Usage};
 use crate::runtime;
 use crate::sandbox::{Sandbox, SandboxSpec, WORK};
 use crate::tools::{
-    ApplyPatch, BeamTool, Ctx, ExtraTool, Finish, LeanCheck, ReadFile, Role, Shell, Submit, Tool,
-    WriteFile,
+    ApplyPatch, BeamTool, Ctx, ExtraTool, Finish, FinishReport, LeanCheck, ReadFile, ReadGuide,
+    Role, Shell, Submit, Tool, WriteFile,
 };
 use crate::trace::{Trace, artifact};
+use crate::workflow::{Guides, Workflow};
 use anyhow::{Context, Result, anyhow, bail};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinSet;
@@ -37,6 +38,8 @@ pub struct Harness {
     pub trace: Arc<Trace>,
     pub agent: AgentConfig,
     pub instructions: String,
+    pub workflow: Workflow,
+    pub guides: Arc<Guides>,
     pub shell: bool,
     pub shell_timeout: Duration,
     pub stop: CancellationToken,
@@ -50,6 +53,7 @@ pub struct Harness {
 /// How an attempt ended. `termination` is why the conversation stopped;
 /// `verdict` is what happened to the saved file afterwards.
 pub struct AttemptResult {
+    pub workflow: Workflow,
     pub id: String,
     pub label: String,
     pub submitted: bool,
@@ -68,6 +72,7 @@ pub struct AttemptResult {
 /// `Finished` means a helper called `finish`. Only `Verified` can be published.
 pub enum Verdict {
     NotSubmitted,
+    Reported,
     Finished,
     Verified(Verified),
     Rejected(String),
@@ -79,13 +84,14 @@ impl AttemptResult {
     /// trace_report.py reads these fields.
     pub fn report(&self) -> Value {
         let (status, detail) = match &self.verdict {
+            Verdict::Reported => ("reported", ""),
             Verdict::NotSubmitted => ("not_submitted", ""),
             Verdict::Finished => ("finished", ""),
             Verdict::Verified(v) => ("verified", v.report()),
             Verdict::Rejected(s) => ("rejected", s.as_str()),
             Verdict::Failed(s) => ("failed", s.as_str()),
         };
-        json!({"id": self.id, "label": self.label, "status": status, "detail": detail,
+        json!({"id": self.id, "label": self.label, "workflow": self.workflow.name(), "status": status, "detail": detail,
             "submitted": self.submitted, "turns": self.turns, "usage": self.usage,
             "termination": self.termination, "note": self.note, "last_message": self.last_message,
             "candidate": self.candidate})
@@ -137,15 +143,18 @@ impl Harness {
         tools.extend([
             Arc::new(LeanCheck) as Arc<dyn Tool>,
             Arc::new(ReadFile),
-            Arc::new(ApplyPatch),
-            Arc::new(WriteFile),
+            Arc::new(ReadGuide(self.guides.clone())),
         ]);
-        if self.shell {
+        if !self.workflow.inspects_source() {
+            tools.push(Arc::new(ApplyPatch));
+            tools.push(Arc::new(WriteFile));
+        }
+        if self.shell && self.workflow.accepts_proof() {
             tools.push(Arc::new(Shell {
                 timeout: self.shell_timeout,
             }));
         }
-        if role == Role::Lead {
+        if role == Role::Lead && self.workflow.accepts_proof() {
             // Only leads can spawn, so helpers never have helpers of their own.
             tools.push(Arc::new(Subagents {
                 harness: Arc::downgrade(self),
@@ -158,10 +167,16 @@ impl Harness {
                 wait: true,
             }));
         }
-        tools.push(match role {
-            Role::Lead => Arc::new(Submit),
-            Role::Subagent => Arc::new(Finish),
-        });
+        if role == Role::Subagent {
+            tools.push(Arc::new(Finish));
+        } else {
+            if self.workflow.accepts_proof() {
+                tools.push(Arc::new(Submit));
+            }
+            if self.workflow.accepts_report() {
+                tools.push(Arc::new(FinishReport(self.workflow)));
+            }
+        }
         tools
     }
 
@@ -202,6 +217,17 @@ impl Harness {
             })
             .await??;
             let root = attempt.root();
+            // Lean probes may perform IO. A source review only succeeds if its
+            // frozen files still equal the operator's starting candidate.
+            let mut baseline = Vec::new();
+            if self.workflow.inspects_source() {
+                for path in self.task.targets() {
+                    baseline.push((
+                        path.clone(),
+                        worktrees::read_beneath(&root, path, MAX_FILE)?,
+                    ));
+                }
+            }
             let children = Arc::new(tokio::sync::Mutex::new(Children {
                 running: JoinSet::new(),
                 stop: stop.child_token(),
@@ -212,7 +238,7 @@ impl Harness {
             let mut outcome = match async {
                 let s = Arc::new(Sandbox::create(&self.sandbox, &id, &root).await?);
                 sandbox = Some(s.clone());
-                if self.task.targets().count() > 1 {
+                if root.join("proof-files.json").is_file() {
                     // Cold workspaces have no local .oleans for Beam to import.
                     // A seed with a proof error can still be repaired by the model.
                     let modules: Vec<_> = self
@@ -243,9 +269,19 @@ impl Harness {
                 let beam = Arc::new(beam);
                 // Resolve imports before the first paid request. Source diagnostics
                 // remain available for repair; runtime/setup failures stop startup.
-                beam.call("lean_sync", &json!({"path": self.task.target().as_str()}))
+                if let Err(error) = beam
+                    .call("lean_sync", &json!({"path": self.task.target().as_str()}))
                     .await
-                    .context("initial Lean workspace setup")?;
+                {
+                    if self.workflow != Workflow::Diagnose {
+                        return Err(error.context("initial Lean workspace setup"));
+                    }
+                    self.trace.event(
+                        &id,
+                        "diagnose_initial_sync",
+                        json!({"error":format!("{error:#}")}),
+                    );
+                }
                 let ctx = Ctx {
                     id: id.clone(),
                     role,
@@ -255,8 +291,7 @@ impl Harness {
                     beam: beam.clone(),
                     sandbox: s.clone(),
                     trace: self.trace.clone(),
-                    submitted: AtomicBool::new(false),
-                    note: Mutex::new(None),
+                    ending: Mutex::new(None),
                     artifacts: artifacts.clone(),
                     stop: stop.clone(),
                 };
@@ -272,6 +307,9 @@ impl Harness {
                         .context("extra MCP startup timeout")??,
                     );
                     for spec in server.tools() {
+                        if self.workflow.inspects_source() && !spec.read_only {
+                            continue;
+                        }
                         let mut named = spec.clone();
                         named.name = format!("mcp_{}_{}", config.name, spec.name);
                         anyhow::ensure!(
@@ -296,7 +334,12 @@ impl Harness {
                     &ctx,
                 )
                 .await;
-                note = ctx.note.lock().unwrap().clone();
+                note = ctx
+                    .ending
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .and_then(crate::tools::Ending::note);
                 Ok::<_, anyhow::Error>(outcome)
             }
             .await
@@ -343,11 +386,22 @@ impl Harness {
             // Freeze the declared proof files after all sandbox writers stop.
             let frozen = tokio::task::spawn_blocking(move || {
                 capture?;
-                attempt.freeze().context("freeze target")
+                let frozen = attempt.freeze().context("freeze target")?;
+                for (path, bytes) in baseline {
+                    anyhow::ensure!(
+                        frozen
+                            .files()
+                            .get(&path)
+                            .is_some_and(|actual| actual.as_ref() == bytes.as_slice()),
+                        "source changed during read-only workflow: {path}"
+                    );
+                }
+                Ok::<_, anyhow::Error>(frozen)
             })
             .await?;
             let mut result = AttemptResult {
                 id: id.clone(),
+                workflow: self.workflow,
                 label,
                 submitted: outcome.submitted,
                 turns: outcome.turns,
@@ -394,6 +448,7 @@ impl Harness {
                 // Something broke (model, cleanup, capture). That says nothing
                 // about the proof, so it's Failed rather than Rejected.
                 (Some(error), _) => Verdict::Failed(error),
+                (None, Some(_)) if result.termination == "reported" => Verdict::Reported,
                 (None, Some(frozen)) if result.submitted && role == Role::Lead => {
                     self.trace.event(
                         &id,
@@ -453,7 +508,7 @@ impl Harness {
         n: usize,
         prompt: &str,
         seed: Option<&Sources>,
-    ) -> Result<Option<Published>> {
+    ) -> Result<(Option<Published>, Vec<PathBuf>)> {
         let mut running = JoinSet::new();
         for i in 1..=n {
             let h = self.clone();
@@ -473,6 +528,7 @@ impl Harness {
             });
         }
         let mut winner = None;
+        let mut reports = Vec::new();
         let mut error = None;
         while let Some(joined) = running.join_next().await {
             match joined.map_err(anyhow::Error::from).and_then(|r| r) {
@@ -487,6 +543,9 @@ impl Harness {
                         result.usage.cached_input_tokens,
                         result.usage.output_tokens
                     );
+                    if matches!(result.verdict, Verdict::Reported) {
+                        reports.push(result.artifacts.join("result.json"));
+                    }
                     if let Verdict::Verified(v) = result.verdict
                         && winner.is_none()
                     {
@@ -519,7 +578,8 @@ impl Harness {
         if let Some(error) = error {
             return Err(error);
         }
-        Ok(winner)
+        reports.sort();
+        Ok((winner, reports))
     }
 }
 
