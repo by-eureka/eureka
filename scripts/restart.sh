@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Continue a stopped run from its saved proof. The conversation starts fresh.
 #
-#   scripts/restart.sh runs/old runs/new [attempt-000001]
+#   scripts/restart.sh runs/old runs/new [attempt-000001] [extra harness flags...]
 #
 # Use the same environment settings as run.sh. Stop a live run with stop.sh first.
 # The default is the first lead. Select another attempt explicitly if needed.
@@ -9,14 +9,22 @@ set -euo pipefail
 source "$(dirname "$0")/env.sh"
 need_harness
 
-if [ $# -lt 2 ] || [ $# -gt 3 ]; then
+if [ $# -lt 2 ]; then
     sed -n '4p' "$0" | sed 's/^#  *//' >&2
     exit 1
 fi
 
+old_run=$1
+new_run=$2
+shift 2
+attempt=attempt-000001
+if [[ $# -gt 0 && $1 != --* ]]; then
+    attempt=$1
+    shift
+fi
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
-python3 - "$1" "$2" "${3:-attempt-000001}" "$scratch" <<'PY'
+python3 - "$old_run" "$new_run" "$attempt" "$scratch" <<'PY'
 import hashlib
 import json
 from pathlib import Path
@@ -105,5 +113,5 @@ PY
 # run.sh supplies --dont-give-up and the usual model, runtime and retrieval settings.
 run=$(cat "$scratch/run")
 "$ROOT/scripts/run.sh" "$(cat "$scratch/template")" "$run" \
-    --seed "$(cat "$scratch/seed")" --prompt "$(cat "$scratch/prompt")"
+    --seed "$(cat "$scratch/seed")" --prompt "$(cat "$scratch/prompt")" "$@"
 cp "$scratch/restart.json" "$run/restart.json"

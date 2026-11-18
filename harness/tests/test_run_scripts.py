@@ -111,10 +111,12 @@ class RunScripts(unittest.TestCase):
         for name in paths:
             (bundle / name).write_text(name)
         new = root / 'multi'
-        result = subprocess.run([str(scripts / 'restart.sh'), str(self.run), str(new)],
+        headers = ['--no-bearer-auth', '--header-env', 'X-Tapis-Token=TAPIS_TOKEN']
+        result = subprocess.run([str(scripts / 'restart.sh'), str(self.run), str(new), *headers],
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         metadata = json.loads((new / 'restart.json').read_text())
+        self.assertEqual(json.loads((new / 'launch.json').read_text())[-len(headers):], headers)
         self.assertEqual(metadata['seed'], str(bundle))
         self.assertEqual(metadata['seed_files_sha256'], {name: hashlib.sha256(name.encode()).hexdigest()
                                                          for name in paths})

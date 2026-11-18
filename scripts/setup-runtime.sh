@@ -9,7 +9,13 @@ if [ -e "$PACKAGES" ]; then
     echo "$PACKAGES already exists; set PACKAGES to a new directory for this runtime" >&2
     exit 1
 fi
-beam_rev=$(git -C lean-beam rev-parse HEAD)
+# Materialized Nix source has no Git metadata; the consuming checkout can supply its gitlink.
+if [[ -z ${BEAM_REV:-} && ! -e lean-beam/.git ]]; then
+    echo "set BEAM_REV to the pinned lean-beam gitlink when building from packaged source" >&2
+    exit 1
+fi
+beam_rev=${BEAM_REV:-$(git -C lean-beam rev-parse HEAD)}
+[[ $beam_rev =~ ^[0-9a-f]{40}$ ]] || { echo "expected a pinned Leanbeam commit in BEAM_REV" >&2; exit 1; }
 mapfile -t release < <(python3 - <<'PY'
 import json
 from pathlib import Path

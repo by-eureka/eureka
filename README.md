@@ -4,6 +4,8 @@ This is the **dev** version: newer changes land here first and may be less stabl
 The checked stable version is on [`main`](https://github.com/by-eureka/eureka/tree/main).
 See [development and promotion](CONTRIBUTING.md) for separate checkouts and the review process.
 
+The [deployment guide](harness/deploy/README.md#nix-environment-for-craft) describes the CRAFT Nix environment and model gateway authentication.
+
 ## Quick start
 
 The `scripts/` directory wraps the steps below. From the repository root:

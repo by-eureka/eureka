@@ -12,6 +12,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::time::Duration;
@@ -198,6 +199,8 @@ pub struct ModelConfig {
 pub struct Client {
     http: reqwest::Client,
     pub config: ModelConfig,
+    bearer_auth: bool,
+    extra_headers: HeaderMap,
 }
 
 #[derive(Deserialize)]
@@ -236,13 +239,47 @@ fn context_length_exceeded(error: &Value) -> bool {
 
 impl Client {
     pub fn new(config: ModelConfig) -> Result<Self> {
-        let http = reqwest::Client::builder()
+        Self::new_with_headers(config, true, HeaderMap::new())
+    }
+
+    pub fn new_with_headers(
+        config: ModelConfig,
+        bearer_auth: bool,
+        extra_headers: HeaderMap,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            !bearer_auth || !extra_headers.contains_key(reqwest::header::AUTHORIZATION),
+            "pass --no-bearer-auth to supply an explicit Authorization header"
+        );
+        // reqwest strips standard credentials on cross-origin redirects, but custom
+        // gateway headers can have arbitrary names. Send them only to the configured URL.
+        let mut builder = reqwest::Client::builder();
+        if !extra_headers.is_empty() {
+            builder = builder.redirect(reqwest::redirect::Policy::none());
+        }
+        let http = builder
             .connect_timeout(Duration::from_secs(30))
             // Also bound silent waits for headers and HTTP error bodies. Each
             // successful read resets this timer; it is not a total deadline.
             .read_timeout(config.idle_timeout)
             .build()?;
-        Ok(Self { http, config })
+        Ok(Self {
+            http,
+            config,
+            bearer_auth,
+            extra_headers,
+        })
+    }
+
+    fn request(&self, url: &str, body: &Value) -> reqwest::RequestBuilder {
+        let mut request = self.http.post(url).json(body);
+        if self.bearer_auth {
+            request = request.bearer_auth(&self.config.api_key);
+        }
+        for (name, value) in &self.extra_headers {
+            request = request.header(name.clone(), value.clone());
+        }
+        request
     }
 
     /// Build the request body for `input` with the given tools. Public so the
@@ -340,14 +377,7 @@ impl Client {
         attempt: u32,
     ) -> Result<Attempt> {
         let url = format!("{}/responses", self.config.base_url.trim_end_matches('/'));
-        let response = match self
-            .http
-            .post(&url)
-            .bearer_auth(&self.config.api_key)
-            .json(body)
-            .send()
-            .await
-        {
+        let response = match self.request(&url, body).send().await {
             Ok(r) => r,
             Err(e) => return Ok(Attempt::Retry(format!("transport: {e}"))),
         };
@@ -490,6 +520,48 @@ impl Client {
     }
 }
 
+/// Resolve repeatable `HEADER=ENV_VAR` specifications into sensitive HTTP headers.
+/// The environment-variable name may appear in argv/configuration; the secret value does not.
+pub fn headers_from_env(specs: &[String]) -> Result<HeaderMap> {
+    headers_from_env_with(specs, |name| std::env::var(name).ok())
+}
+
+fn headers_from_env_with<F>(specs: &[String], mut lookup: F) -> Result<HeaderMap>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut headers = HeaderMap::new();
+    for spec in specs {
+        let (raw_name, env_name) = spec
+            .split_once('=')
+            .context("expected --header-env HEADER=ENV_VAR")?;
+        let name = HeaderName::from_bytes(raw_name.trim().as_bytes())
+            .context("invalid HTTP header name in --header-env")?;
+        let env_name = env_name.trim();
+        anyhow::ensure!(
+            !env_name.is_empty()
+                && env_name.bytes().enumerate().all(|(i, c)| {
+                    c == b'_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit())
+                }),
+            "expected an environment variable name for header `{name}`"
+        );
+        let secret = lookup(env_name)
+            .filter(|value| !value.is_empty())
+            .with_context(|| {
+                format!("environment variable `{env_name}` for header `{name}` is missing or empty")
+            })?;
+        let mut value = HeaderValue::from_bytes(secret.as_bytes()).with_context(|| {
+            format!("invalid HTTP header value in `{env_name}` for header `{name}`")
+        })?;
+        value.set_sensitive(true);
+        anyhow::ensure!(
+            headers.insert(name.clone(), value).is_none(),
+            "duplicate provider header `{name}` in --header-env"
+        );
+    }
+    Ok(headers)
+}
+
 fn capture_event(
     capture: Option<&crate::trace::Trace>,
     id: &str,
@@ -610,6 +682,69 @@ mod tests {
             serde_json::json!({"output":[{"content":[{"type":"output_text","text":"hello","logprobs":[{"token":"hello","logprob":-0.2}]}]}]}),
         );
         assert!(c.require_logprobs().is_ok());
+    }
+
+    #[test]
+    fn header_env_resolves_without_exposing_secret_in_spec() {
+        let specs = vec!["X-Tapis-Token=TAPIS_TOKEN".to_owned()];
+        let headers = headers_from_env_with(&specs, |name| match name {
+            "TAPIS_TOKEN" => Some("secret-token".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(headers.get("X-Tapis-Token").unwrap(), "secret-token");
+        assert!(headers.get("X-Tapis-Token").unwrap().is_sensitive());
+    }
+
+    #[test]
+    fn header_env_rejects_bad_specs_missing_env_and_duplicates() {
+        assert!(headers_from_env_with(&["bad".to_owned()], |_| Some("x".to_owned())).is_err());
+        assert!(headers_from_env_with(&["X-Test=MISSING".to_owned()], |_| None).is_err());
+        assert!(
+            headers_from_env_with(&["X-Test=A".to_owned(), "X-Test=B".to_owned()], |_| Some(
+                "x".to_owned()
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn client_combines_gateway_and_optional_bearer_auth() {
+        let mut headers = HeaderMap::new();
+        let mut value = HeaderValue::from_static("secret-token");
+        value.set_sensitive(true);
+        headers.insert(HeaderName::from_static("x-tapis-token"), value);
+        let config = ModelConfig {
+            base_url: "http://example.invalid/v1".into(),
+            api_key: "unused".into(),
+            model: "test".into(),
+            effort: "low".into(),
+            max_output_tokens: 32,
+            logprobs: false,
+            idle_timeout: Duration::from_secs(1),
+            max_attempts: 1,
+        };
+        for bearer in [false, true] {
+            let client = Client::new_with_headers(config.clone(), bearer, headers.clone()).unwrap();
+            let request = client
+                .request(
+                    "http://example.invalid/v1/responses",
+                    &serde_json::json!({}),
+                )
+                .build()
+                .unwrap();
+            assert_eq!(
+                request
+                    .headers()
+                    .get("authorization")
+                    .map(|v| v.to_str().unwrap()),
+                bearer.then_some("Bearer unused")
+            );
+            assert_eq!(
+                request.headers().get("x-tapis-token").unwrap(),
+                "secret-token"
+            );
+        }
     }
 
     #[test]

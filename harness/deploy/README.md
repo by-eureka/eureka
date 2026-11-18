@@ -33,6 +33,28 @@ scripts/reverify.sh runs/problem /path/to/candidate.lean runs/recheck
 
 `BASE_URL`, `MODEL`, `API_KEY_FILE`, `MAX_TURNS`, and `MAX_OUTPUT_TOKENS` configure model runs. Reverification needs neither an API key nor Docker.
 
+### LiteLLM and Tapis authentication
+
+Set `BASE_URL` to the model gateway's API base (including `/v1` if the route uses it). Eureka appends `/responses`. For a gateway that authenticates solely with a Tapis token, export `TAPIS_TOKEN` privately on the controller and run:
+
+```bash
+BASE_URL=https://gateway.example/v1 MODEL=served-model NO_BEARER_AUTH=true \
+  scripts/run.sh examples/simple runs/gateway --header-env X-Tapis-Token=TAPIS_TOKEN
+```
+
+If LiteLLM also requires a bearer key, omit `NO_BEARER_AUTH` and supply the LiteLLM key through `API_KEY_FILE`. Each `--header-env HEADER=ENV_VAR` reads its value on the controller. Use the gateway's final URL because requests with custom headers do not follow redirects. Pass the same header flags when calling `scripts/restart.sh`. The `TAPIS_TOKEN_FILE` configured for provisioning proof pods is independent of model authentication.
+
+### Nix environment for CRAFT
+
+Use Nix 2.27+ with flakes enabled and a Git checkout with submodules. For a downstream flake, use `git+https://github.com/by-eureka/eureka?ref=dev&submodules=1` and commit the consumer's lock file.
+
+```bash
+nix build --no-link .#runtimeSource .#buildTools
+nix develop
+```
+
+The shell sets `EUREKA_NIX_SOURCE_PATH` to the packaged source under `share/eureka`. CRAFT can copy that tree to a writable installation for the build and run scripts. For a worker image build from that copy, set `BEAM_REV` to the consuming Eureka revision's `lean-beam` gitlink (`git rev-parse HEAD:lean-beam` in the pinned checkout). Use the runtime setup above for the matching Lean SDK, worker image and packages. Running the verifier requires Linux with a working user systemd manager and unprivileged user namespaces.
+
 ## Verification
 
 Lean 4.35+ supplies `lake comparator --config config.json`, its matching exporter and kernel checker. The separate Comparator checkout, `--comparator` flag and Landrun dependency are removed. Lake uses Bubblewrap to build and export untrusted code; systemd bounds the entire process tree. Shared packages are mounted read-only, and verification starts from a fresh trusted template with only the candidate source substituted.

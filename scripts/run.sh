@@ -7,6 +7,7 @@
 #   BASE_URL, MODEL        endpoint and model (default: DeepSeek's API, deepseek-flash)
 #   DEEPSEEK_API_KEY       prompted for if neither it nor OPENAI_API_KEY is set
 #   API_KEY_FILE           read the API key from this file instead
+#   NO_BEARER_AUTH=true    skip the provider bearer key (also accepts --no-bearer-auth)
 #   MAX_TURNS              default 200
 #   MAX_OUTPUT_TOKENS      default 200000, reasoning included; input plus output
 #                          must fit the server's context window
@@ -33,24 +34,35 @@ if [ -e "$run" ]; then
     exit 1
 fi
 
-if [ -n "${API_KEY_FILE:-}" ]; then
-    DEEPSEEK_API_KEY=$(cat "$API_KEY_FILE")
-    export DEEPSEEK_API_KEY
-elif [ -z "${DEEPSEEK_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
-    read -rsp 'API key: ' DEEPSEEK_API_KEY
-    echo
-    export DEEPSEEK_API_KEY
-fi
-
 args=(
     --template "$problem" --store "$run/store"
     --packages "$PACKAGES"
-    --base-url "${BASE_URL:-https://api.deepseek.com}" --model "${MODEL:-deepseek-flash}"
+    --model "${MODEL:-deepseek-flash}"
     --max-turns "${MAX_TURNS:-200}" --max-output-tokens "${MAX_OUTPUT_TOKENS:-200000}"
     --dont-give-up --trace "$run/trace.jsonl" --capture-requests
     "--logprobs=${LOGPROBS:-true}"
     --beam-skill "$ROOT/lean-beam/skills/lean-beam"
 )
+if [ -n "${BASE_URL:-}" ]; then
+    args+=(--base-url "$BASE_URL")
+fi
+
+configure_auth() {
+    for arg in "$@"; do
+        [[ "$arg" != --no-bearer-auth ]] || return 0
+    done
+    if [ "${NO_BEARER_AUTH:-false}" = true ]; then
+        args+=(--no-bearer-auth)
+    elif [ -n "${API_KEY_FILE:-}" ]; then
+        DEEPSEEK_API_KEY=$(cat "$API_KEY_FILE")
+        export DEEPSEEK_API_KEY
+    elif [ -z "${DEEPSEEK_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+        read -rsp 'API key: ' DEEPSEEK_API_KEY
+        echo
+        export DEEPSEEK_API_KEY
+    fi
+}
+configure_auth "$@"
 if [ "${RETRIEVAL:-0}" = 1 ]; then
     args+=(--image "${IMAGE:-$AGENT_IMAGE}" --network "${NETWORK:-$RETRIEVAL_NETWORK}" --mcp "$ROOT/tools/retrieval/mcp.json")
 else
