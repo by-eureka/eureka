@@ -14,9 +14,28 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --manifest-path harness/Cargo.toml --check
-      - run: cargo test --locked --manifest-path harness/Cargo.toml --lib --test responses
+      - run: cargo test --locked --manifest-path harness/Cargo.toml --lib --bin harness --test responses
       - run: cargo test --locked --manifest-path worktrees/Cargo.toml
       - run: python3 -m unittest discover -s harness/tests -p 'test_*.py'
+  nix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      - name: Build the CRAFT packages and test their bundled-verifier workflow
+        run: |
+          nix build --no-link --no-update-lock-file .#runtimeSource .#buildTools
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          nix develop --no-update-lock-file --command bash -euc '
+            export CARGO_TARGET_DIR="$RUNNER_TEMP/craft-target"
+            cd "$EUREKA_NIX_SOURCE_PATH"
+            elan toolchain install "$(cat examples/core/lean-toolchain)"
+            cargo test --locked --manifest-path harness/Cargo.toml --bin harness
+            cargo test --locked --manifest-path harness/Cargo.toml --test lake_verifier -- --ignored
+          '
   native-beam:
     runs-on: ubuntu-24.04
     strategy:
@@ -58,11 +77,12 @@ jobs:
           cargo test --locked --manifest-path harness/Cargo.toml --test beam_surface --test lake_verifier -- --ignored --nocapture
   checks:
     if: always()
-    needs: [regression, native-beam]
+    needs: [regression, native-beam, nix]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every test job to pass
         env:
           REGRESSION: ${{ needs.regression.result }}
+          NIX: ${{ needs.nix.result }}
           NATIVE_BEAM: ${{ needs.native-beam.result }}
-        run: test "$REGRESSION" = success && test "$NATIVE_BEAM" = success
+        run: test "$REGRESSION" = success && test "$NATIVE_BEAM" = success && test "$NIX" = success

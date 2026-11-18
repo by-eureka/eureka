@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use harness::agent::AgentConfig;
-use harness::responses::{Client, ModelConfig};
+use harness::responses::{Client, ModelConfig, headers_from_env};
 use harness::runtime;
 use harness::sandbox::SandboxSpec;
 use harness::search::Harness;
@@ -56,10 +56,22 @@ struct Cli {
     /// CPU limit per sandbox.
     #[arg(long, default_value_t = 2.0)]
     cpus: f32,
-    #[arg(long, default_value = "https://api.deepseek.com")]
-    base_url: String,
+    /// Model endpoint (defaults to https://api.deepseek.com). Required with custom headers.
+    #[arg(long)]
+    base_url: Option<String>,
     #[arg(long, default_value = "deepseek-flash")]
     model: String,
+    /// Do not send an Authorization: Bearer header to the model provider.
+    #[arg(long)]
+    no_bearer_auth: bool,
+    /// Add a model-provider header whose value is read from an environment variable.
+    /// Repeat as needed, e.g. --header-env X-Tapis-Token=TAPIS_TOKEN.
+    #[arg(
+        long = "header-env",
+        value_name = "HEADER=ENV_VAR",
+        requires = "base_url"
+    )]
+    header_env: Vec<String>,
     /// Reasoning effort: low, high, max.
     #[arg(long, default_value = "high")]
     effort: String,
@@ -103,6 +115,36 @@ struct Cli {
     /// Continue text-only replies until submit/finish or the turn limit; encourage persistence.
     #[arg(long)]
     dont_give_up: bool,
+}
+
+impl Cli {
+    fn model_client(&self) -> Result<Client> {
+        let api_key = if self.no_bearer_auth {
+            String::new()
+        } else {
+            std::env::var("DEEPSEEK_API_KEY")
+                .or_else(|_| std::env::var("OPENAI_API_KEY"))
+                .context("set DEEPSEEK_API_KEY or OPENAI_API_KEY, or pass --no-bearer-auth")?
+        };
+        Client::new_with_headers(
+            ModelConfig {
+                base_url: self
+                    .base_url
+                    .as_deref()
+                    .unwrap_or("https://api.deepseek.com")
+                    .to_owned(),
+                api_key,
+                model: self.model.clone(),
+                effort: self.effort.clone(),
+                max_output_tokens: self.max_output_tokens,
+                logprobs: self.logprobs,
+                idle_timeout: Duration::from_secs(60 * 60),
+                max_attempts: 5,
+            },
+            !self.no_bearer_auth,
+            headers_from_env(&self.header_env)?,
+        )
+    }
 }
 
 #[tokio::main]
@@ -181,6 +223,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     anyhow::ensure!(cli.agents > 0, "--agents must be positive");
+    let client = cli.model_client()?;
     let tapis = cli
         .tapis_backend
         .as_ref()
@@ -206,20 +249,6 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|p| proof_files::load(&task, p))
         .transpose()?;
-    let api_key = std::env::var("DEEPSEEK_API_KEY")
-        .or_else(|_| std::env::var("OPENAI_API_KEY"))
-        .context("set DEEPSEEK_API_KEY or OPENAI_API_KEY")?;
-    // The API key stays on the host. Only explicit runtime variables enter containers.
-    let client = Client::new(ModelConfig {
-        base_url: cli.base_url,
-        api_key,
-        model: cli.model,
-        effort: cli.effort,
-        max_output_tokens: cli.max_output_tokens,
-        logprobs: cli.logprobs,
-        idle_timeout: Duration::from_secs(60 * 60),
-        max_attempts: 5,
-    })?;
     let harness = Arc::new(Harness {
         task,
         client,
@@ -306,5 +335,90 @@ async fn main() -> Result<()> {
             eprintln!("no agent produced a verified proof");
             std::process::exit(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn custom_headers_require_an_explicit_destination() {
+        let parsed = Cli::try_parse_from([
+            "harness",
+            "--template",
+            ".",
+            "--packages",
+            ".",
+            "--store",
+            ".",
+            "--header-env",
+            "X-Tapis-Token=TAPIS_TOKEN",
+        ]);
+        assert_eq!(
+            parsed.unwrap_err().kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_provider_headers_reach_http_without_bearer_auth() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        // Use an existing variable so this test never mutates process-wide environment.
+        let expected = std::env::var("PATH").unwrap();
+        let cli = Cli::parse_from([
+            "harness",
+            "--template",
+            ".",
+            "--store",
+            ".",
+            "--packages",
+            ".",
+            "--base-url",
+            &format!("http://{address}/v1"),
+            "--no-bearer-auth",
+            "--header-env",
+            "X-Tapis-Token=PATH",
+            "--header-env",
+            "X-Tapis-Tenant=PATH",
+            "--logprobs=false",
+        ]);
+        let client = cli.model_client().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            while !bytes.ends_with(b"\r\n\r\n") {
+                bytes.push(socket.read_u8().await.unwrap());
+            }
+            let headers = String::from_utf8(bytes).unwrap();
+            assert!(!headers.to_ascii_lowercase().contains("\r\nauthorization:"));
+            assert!(headers.contains(&format!("x-tapis-token: {expected}\r\n")));
+            assert!(headers.contains(&format!("x-tapis-tenant: {expected}\r\n")));
+            let mut body = [0; 2];
+            socket.read_exact(&mut body).await.unwrap();
+            assert_eq!(&body, b"{}");
+            let response = "data: {\"type\":\"response.completed\",\"response\":{}}\n\n";
+            socket.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                response.len()
+            ).as_bytes()).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.jsonl");
+        let trace = trace::Trace::open(&path).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            client.complete(&json!({}), &trace, "headers", Some(&trace)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        server.await.unwrap();
+        let capture = std::fs::read_to_string(&path).unwrap();
+        assert!(!capture.contains(&std::env::var("PATH").unwrap()));
     }
 }
