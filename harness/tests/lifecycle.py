@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Local integration tests: real sandboxes/Beam/Lake verifier, scripted model responses.
-No model provider, API keys, or paid requests are used.
+"""Integration tests with real sandboxes, Beam, the Lake verifier and a scripted model.
+The optional TACC test uses the operator's Pods allocation.
 
 Build the harness and native runtime image, then from the repository root:
     export HARNESS_PACKAGES=/path/to/lean-packages
@@ -101,15 +101,15 @@ class Lifecycle(unittest.TestCase):
         self.thread.join()
         self.temp.cleanup()
 
-    def run_harness(self, *extra):
+    def run_harness(self, *extra, timeout=150):
         # main.rs won't start without a key; the fake server ignores it.
         env = dict(os.environ, DEEPSEEK_API_KEY='local-test-only')
-        result = subprocess.run(self.args + list(extra), cwd=ROOT, env=env, text=True, capture_output=True, timeout=150)
+        result = subprocess.run(self.args + list(extra), cwd=ROOT, env=env, text=True, capture_output=True, timeout=timeout)
         self.assertFalse(self.server.errors, self.server.errors)
         return result
 
-    def records(self):
-        return [json.loads(p.read_text()) for p in sorted(self.dir.glob('pool-*/attempts/*/result.json'))]
+    def records(self, store=None):
+        return [json.loads(p.read_text()) for p in sorted((store or self.dir).glob('pool-*/attempts/*/result.json'))]
 
     def test_missing_packages_stop_before_model_requests(self):
         packages = self.dir / 'empty-packages'
@@ -306,8 +306,38 @@ class Lifecycle(unittest.TestCase):
         self.assertFalse(remaining.strip(), 'orphan containers')
 
     def test_multi_file_patch_and_helper_handoff(self):
+        self.check_multi_file_handoff('core', self.dir, timeout=150)
+
+    @unittest.skipUnless(os.getenv('HARNESS_TAPIS_TEST_BACKEND'), 'set HARNESS_TAPIS_TEST_BACKEND for the two-pod test')
+    def test_tapis_multi_file_patch_and_helper_handoff(self):
+        backend = os.environ['HARNESS_TAPIS_TEST_BACKEND']
+        startup = int(os.getenv('TAPIS_START_TIMEOUT', '900'))
+        (ROOT / 'runs').mkdir(exist_ok=True)
+        store = Path(tempfile.mkdtemp(dir=ROOT / 'runs', prefix='tapis-lifecycle-'))
+        print(f'Tapis test artifacts: {store}', flush=True)
+        self.args[self.args.index('--store') + 1] = str(store)
+        self.args[self.args.index('--trace') + 1] = str(store / 'trace.jsonl')
+        self.args[self.args.index('--max-turns') + 1] = str(startup // 30 + 16)
+        self.args.extend(['--tapis-backend', backend, '--cpus', '1', '--memory-mib', '8192'])
+
+        try:
+            self.check_multi_file_handoff('simple', store, timeout=2 * startup + 600)
+        finally:
+            for metadata in store.glob('pool-*/attempts/*/tapis/pod.json'):
+                state = metadata.parent
+                if not (state / 'deleted').exists():
+                    self.addCleanup(subprocess.run, [backend, 'delete', str(state)], check=True, timeout=150)
+
+        pods = list(store.glob('pool-*/attempts/*/tapis/pod.json'))
+        self.assertEqual(len(pods), 2)
+        self.assertEqual(len({json.loads(p.read_text())['id'] for p in pods}), 2)
+        for pod in pods:
+            self.assertTrue((pod.parent / 'deleted').is_file())
+            self.assertFalse((pod.parent / 'identity').exists())
+
+    def check_multi_file_handoff(self, example, store, timeout):
         template = self.dir / 'template'
-        shutil.copytree(ROOT / 'examples/core', template)
+        shutil.copytree(ROOT / 'examples' / example, template)
         self.args[self.args.index('--template') + 1] = str(template)
         primary, helper = 'Proofs/Solution.lean', 'Proofs/Helper.lean'
         (template / 'proof-files.json').write_text(json.dumps([primary, helper]))
@@ -347,14 +377,17 @@ class Lifecycle(unittest.TestCase):
             if lead_turn == 3:
                 self.assertIn('started', json.loads(outputs[-1]))
                 return [call('wait_subagents', {})]
-            handoff, = json.loads(outputs[-1])['completed']
+            status = json.loads(outputs[-1])
+            if status['remaining'] and not status['completed']:
+                return [call('wait_subagents', {})]
+            handoff, = status['completed']
             self.assertIn('child only', handoff['files'][helper])
             self.assertIn(solved_second, handoff['files'][primary])
             return [call('submit', {})]
         self.server.respond = respond
-        result = self.run_harness('--no-shell')
+        result = self.run_harness('--no-shell', timeout=timeout)
         self.assertEqual(result.returncode, 0, result.stderr)
-        lead, child = self.records()
+        lead, child = self.records(store)
         self.assertEqual(lead['status'], 'verified')
         self.assertEqual((Path(lead['candidate']) / helper).read_text(), solved_first + '\n')
         self.assertIn('child only', (Path(child['candidate']) / helper).read_text())
