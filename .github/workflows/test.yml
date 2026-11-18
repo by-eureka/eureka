@@ -85,7 +85,7 @@ jobs:
           sdk=$(dirname "$(dirname "$HARNESS_BEAM_MCP")")
           docker build -t "$HARNESS_IMAGE" -f - "$sdk" <<'DOCKERFILE'
           FROM ubuntu:24.04
-          RUN apt-get update && apt-get install -y --no-install-recommends git libgmp10 libuv1t64 && rm -rf /var/lib/apt/lists/*
+          RUN apt-get update && apt-get install -y --no-install-recommends git libgmp10 libuv1t64 tzdata && rm -rf /var/lib/apt/lists/*
           COPY . /opt/lean
           RUN mkdir -p /opt/elan/toolchains && ln -s /opt/lean /opt/elan/toolchains/leanprover--lean4---v4.35.0
           DOCKERFILE
