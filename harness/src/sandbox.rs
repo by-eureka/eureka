@@ -25,6 +25,7 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 pub struct SandboxSpec {
     /// Image containing the pinned Lean SDK and native Beam runtime.
     pub image: String,
+    pub tapis: Option<crate::tapis::TapisSpec>,
     /// Docker network name, or `none` for disconnected execution.
     pub network: String,
     /// Host directory holding the image's prepared `.lake/packages`.
@@ -40,6 +41,7 @@ pub struct SandboxSpec {
 
 pub struct Sandbox {
     name: String,
+    pod: Option<crate::tapis::TapisPod>,
     env: Vec<(String, String)>,
     closed: AtomicBool,
 }
@@ -47,6 +49,17 @@ pub struct Sandbox {
 impl Sandbox {
     /// Start a container for the attempt at `root`. Returns once it is running.
     pub async fn create(spec: &SandboxSpec, attempt: &str, root: &Path) -> Result<Self> {
+        if let Some(tapis) = &spec.tapis {
+            let (name, pod) = tapis
+                .create(attempt, root, &spec.image, spec.memory_mib, spec.cpus)
+                .await?;
+            return Ok(Self {
+                name,
+                pod: Some(pod),
+                env: vec![],
+                closed: AtomicBool::new(false),
+            });
+        }
         let root = std::fs::canonicalize(root)?;
         let packages = std::fs::canonicalize(&spec.packages)?;
         // Docker would create a missing mount point as root; keep it ours.
@@ -81,6 +94,7 @@ impl Sandbox {
         let started = run(cmd).await.context("docker run");
         let sandbox = Self {
             name,
+            pod: None,
             env: spec.env.clone(),
             closed: AtomicBool::new(false),
         };
@@ -102,6 +116,9 @@ impl Sandbox {
 
     /// A command executed inside the container, in `/work`, with stdio piped.
     pub fn command(&self, program: &str, args: &[&str]) -> Command {
+        if let Some(pod) = &self.pod {
+            return pod.command(program, args);
+        }
         // Only `env` is passed in, never the host environment.
         let mut cmd = Command::new("docker");
         cmd.args(["exec", "-i", "-w", WORK]);
@@ -161,9 +178,49 @@ impl Sandbox {
         }
     }
 
-    /// Stop and delete the container. Files in the attempt root remain.
+    pub async fn read_file(
+        &self,
+        root: &Path,
+        path: &worktrees::RelPath,
+        limit: u64,
+    ) -> Result<Vec<u8>> {
+        if let Some(pod) = &self.pod {
+            return pod.file(path.as_str(), limit, None).await;
+        }
+        Ok(worktrees::read_beneath(root, path, limit)?)
+    }
+
+    pub async fn write_file(
+        &self,
+        root: &Path,
+        path: &worktrees::RelPath,
+        bytes: &[u8],
+    ) -> Result<()> {
+        if let Some(pod) = &self.pod {
+            pod.file(path.as_str(), 0, Some(bytes)).await?;
+            return Ok(());
+        }
+        Ok(worktrees::replace_beneath(root, path, bytes)?)
+    }
+
+    /// A pod has no host bind mount. Capture only the candidate, into the private
+    /// verifier-side attempt. A failed capture must never publish its old seed.
+    pub async fn collect_target(&self, root: &Path, path: &worktrees::RelPath) -> Result<()> {
+        if let Some(pod) = &self.pod {
+            let bytes = pod.file(path.as_str(), 4 * 1024 * 1024, None).await?;
+            worktrees::replace_beneath(root, path, &bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Stop and delete this attempt's sandbox.
     pub async fn close(&self) -> Result<()> {
         if self.closed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        if let Some(pod) = &self.pod {
+            pod.close().await?;
+            self.closed.store(true, Ordering::SeqCst);
             return Ok(());
         }
         let mut cmd = Command::new("docker");

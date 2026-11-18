@@ -277,6 +277,11 @@ impl Harness {
             if let Err(error) = children.lock().await.close().await {
                 outcome.error = Some(format!("child cleanup: {error:#}"));
             }
+            let capture = if let Some(sandbox) = &sandbox {
+                sandbox.collect_target(&root, self.task.target()).await
+            } else {
+                Ok(())
+            };
             if let Some(sandbox) = sandbox
                 && let Err(error) = sandbox.close().await
             {
@@ -296,7 +301,11 @@ impl Harness {
             }
             self.usage.lock().unwrap().add(&outcome.usage);
             // Keeps only the target file; the rest of the workspace is discarded.
-            let frozen = tokio::task::spawn_blocking(move || attempt.freeze()).await?;
+            let frozen = tokio::task::spawn_blocking(move || {
+                capture?;
+                attempt.freeze().context("freeze target")
+            })
+            .await?;
             let mut result = AttemptResult {
                 id: id.clone(),
                 label,
@@ -448,7 +457,11 @@ impl Harness {
             }
         }
         // Also catches containers left by a panicking task, after every task joins.
-        crate::sandbox::prune(&self.sandbox.run_id).await?;
+        if let Some(tapis) = &self.sandbox.tapis {
+            tapis.prune().await?;
+        } else {
+            crate::sandbox::prune(&self.sandbox.run_id).await?;
+        }
         self.trace.event(
             "harness",
             "run_end",
@@ -559,11 +572,11 @@ impl Tool for Subagents {
                     "repair the seed before spawning; sorries are allowed, elaboration errors are not: {sync}"
                 );
             }
-            let seed = String::from_utf8(worktrees::read_beneath(
-                &ctx.root,
-                &ctx.target,
-                4 * 1024 * 1024,
-            )?)?;
+            let seed = String::from_utf8(
+                ctx.sandbox
+                    .read_file(&ctx.root, &ctx.target, 4 * 1024 * 1024)
+                    .await?,
+            )?;
             let mut ids = Vec::new();
             for (label, prompt) in tasks {
                 let id = harness.id();
