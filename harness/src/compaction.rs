@@ -30,11 +30,19 @@ pub(crate) async fn compact(
 ) -> Result<Vec<Item>> {
     let dir = ctx.artifacts.join(format!("compaction-{number:04}"));
     std::fs::create_dir(&dir)?;
-    let target = ctx
-        .sandbox
-        .read_file(&ctx.root, &ctx.target, 4 * 1024 * 1024)
-        .await?;
-    artifact(&dir.join("candidate.lean"), &target)?;
+    for path in &ctx.proof_files {
+        let bytes = ctx
+            .sandbox
+            .read_file(&ctx.root, path, crate::proof_files::MAX_FILE)
+            .await?;
+        let dest = if ctx.proof_files.len() == 1 {
+            dir.join("candidate.lean")
+        } else {
+            dir.join("candidate").join(path.as_path())
+        };
+        std::fs::create_dir_all(dest.parent().unwrap())?;
+        artifact(&dest, &bytes)?;
+    }
     if capture {
         artifact(
             &dir.join("history.json"),
@@ -123,7 +131,11 @@ pub(crate) async fn compact(
          The sandbox, files and existing helpers are unchanged. Read {} and check current Lean \
          diagnostics before editing; the file is authoritative and this handoff may contain \
          unverified claims. Collect existing helpers rather than duplicating their tasks.\n\n{summary}",
-        ctx.target,
+        ctx.proof_files
+            .iter()
+            .map(|p| p.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
     );
     artifact(&dir.join("handoff.txt"), handoff.as_bytes())?;
     ctx.trace.event(

@@ -9,12 +9,15 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
-use worktrees::{Verification, Verifier, VerifyError};
+use worktrees::{Pool, Verification, Verifier, VerifyError};
 
 pub struct LeanVerifier {
     lake: PathBuf,
     policy: String,
     solution_module: String,
+    challenge_module: String,
+    reference_names: Vec<String>,
+    separate_reference: bool,
     pub timeout: Duration,
     /// Trusted prebuilt dependencies, mounted read-only inside the fresh root.
     pub deps: Option<PathBuf>,
@@ -84,6 +87,10 @@ fn supported_version(version: &str) -> bool {
 }
 
 impl LeanVerifier {
+    pub fn challenge_path(&self) -> String {
+        self.challenge_module.replace('.', "/") + ".lean"
+    }
+
     pub fn from_template(template: &Path) -> anyhow::Result<Self> {
         let toolchain = std::fs::read_to_string(template.join("lean-toolchain"))?;
         let toolchain = toolchain.trim();
@@ -122,13 +129,178 @@ impl LeanVerifier {
             "lake-comparator-v1;toolchain:{toolchain};compiler:{};config:{canonical_config}",
             version_text.trim()
         );
+        // The comparator compares these kernel primitives even if the requested
+        // theorem doesn't mention them (Lake/CLI/Check.lean, primitiveTargets).
+        // Restrict exports to these closures; exporting every constant in Mathlib
+        // would make a small proof depend on the size of the whole library.
+        let mut reference_names = [
+            "Nat.add",
+            "Nat.sub",
+            "Nat.mul",
+            "Nat.pow",
+            "Nat.gcd",
+            "Nat.div",
+            "Nat.mod",
+            "Nat.beq",
+            "Nat.ble",
+            "Nat.land",
+            "Nat.lor",
+            "Nat.xor",
+            "Nat.shiftLeft",
+            "Nat.shiftRight",
+            "String.ofList",
+            "Char.ofNat",
+            "List",
+            "eagerReduce",
+            "Nat",
+            "String",
+            "String.mk",
+            "Char",
+            "optParam",
+            "autoParam",
+            "semiOutParam",
+            "outParam",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        if parsed.permitted_axioms.iter().any(|s| s == "Quot.sound") {
+            reference_names.extend(["Quot", "Quot.mk", "Quot.lift", "Quot.ind"].map(str::to_owned));
+        }
+        reference_names.extend(parsed.theorem_names);
+        reference_names.extend(parsed.definition_names);
+        reference_names.extend(parsed.permitted_axioms);
         Ok(Self {
             lake,
             policy,
             solution_module: parsed.solution_module,
+            challenge_module: parsed.challenge_module,
+            reference_names,
+            separate_reference: template.join("proof-files.json").is_file(),
             timeout: Duration::from_secs(1800),
             deps: None,
         })
+    }
+    /// Build the reference with the *original* imports, even when a challenge
+    /// and solution share an editable dependency. The private reference stays
+    /// outside the candidate project and Lake reads it via --challenge-from-export.
+    pub fn prepare(&self, pool: &Pool) -> std::io::Result<()> {
+        if self.separate_reference {
+            self.reference_export(pool)?;
+        }
+        Ok(())
+    }
+
+    fn reference_export(&self, pool: &Pool) -> std::io::Result<PathBuf> {
+        let cached = pool.store().join("challenge.ndjson");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(pool.store().join("challenge.lock"))?;
+        lock.lock()?;
+        if cached.is_file() {
+            return Ok(cached);
+        }
+        // Publish only complete exports. All leads and verification retries for
+        // this immutable pool reuse the same reference.
+        let scratch = tempfile::Builder::new()
+            .prefix(".reference-")
+            .tempdir_in(pool.store())?;
+        let dir = scratch.path();
+        let project = dir.join("reference");
+        pool.write_baseline(&project)
+            .map_err(std::io::Error::other)?;
+        let packages = project.join(".lake/packages");
+        std::fs::create_dir_all(&packages)?;
+        let export = dir.join("challenge.ndjson");
+        let bin = self.lake.parent().expect("validated Lean binary directory");
+        let sdk = bin.parent().expect("Lean SDK root");
+        let mut command = Command::new("systemd-run");
+        command
+            .args([
+                "--user",
+                "--wait",
+                "--pipe",
+                "--quiet",
+                "--collect",
+                "--expand-environment=no",
+            ])
+            .arg(format!(
+                "--property=RuntimeMaxSec={}",
+                self.timeout.as_secs()
+            ))
+            .args([
+                "--",
+                "bwrap",
+                "--die-with-parent",
+                "--new-session",
+                "--unshare-all",
+                "--clearenv",
+                "--setenv",
+                "HOME",
+                "/tmp",
+                "--setenv",
+                "PATH",
+            ])
+            .arg(format!("{}:/usr/bin:/bin", bin.display()))
+            .args([
+                "--ro-bind",
+                "/usr",
+                "/usr",
+                "--ro-bind-try",
+                "/bin",
+                "/bin",
+                "--ro-bind-try",
+                "/lib",
+                "/lib",
+                "--ro-bind-try",
+                "/lib64",
+                "/lib64",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--tmpfs",
+                "/tmp",
+                "--ro-bind",
+            ])
+            .arg(sdk)
+            .arg(sdk)
+            .arg("--bind")
+            .arg(dir)
+            .arg(dir);
+        if let Some(deps) = &self.deps {
+            command.arg("--ro-bind").arg(deps).arg(&packages);
+        }
+        // All positional parameters below are controller-owned. Keep Lake's build
+        // chatter out of the NDJSON stream. Only the trusted template is present.
+        let output = command
+            .arg("--chdir")
+            .arg(&project)
+            .args([
+                "--",
+                "sh",
+                "-ec",
+                r#"lake=$1; module=$2; export_file=$3; shift 3
+"$lake" build "+$module" >&2
+"$lake" env "${lake%/*}/leanexport" "$module" -- "$@" > "$export_file""#,
+                "reference",
+            ])
+            .arg(&self.lake)
+            .arg(&self.challenge_module)
+            .arg(&export)
+            .args(&self.reference_names)
+            .output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(format!(
+                "build trusted challenge export: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        std::fs::File::open(&export)?.sync_all()?;
+        std::fs::rename(export, &cached)?;
+        std::fs::File::open(pool.store())?.sync_all()?;
+        Ok(cached)
     }
 }
 
@@ -172,10 +344,15 @@ impl Verifier for LeanVerifier {
                 .arg(packages)
                 .arg("--");
         }
-        let output = command
+        command
             .arg(&self.lake)
-            .args(["comparator", "--config", "config.json"])
-            .output()?;
+            .args(["comparator", "--config", "config.json"]);
+        if self.separate_reference || input.is_multi_file() {
+            command
+                .arg("--challenge-from-export")
+                .arg(self.reference_export(input.pool())?);
+        }
+        let output = command.output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         let report = tail(&format!("{stdout}\n{stderr}"), 1024 * 1024 - 1024);

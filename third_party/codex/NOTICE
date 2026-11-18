@@ -10,3 +10,9 @@ Upstream: https://github.com/openai/codex
 License: Apache License, Version 2.0 (see LICENSE in this directory).
 
 The full Codex reference checkout is not included in this repository.
+
+apply-patch/ adapts the patch grammar, streaming parser, chunk matching and
+line-ending-preserving replacements from codex-rs/apply-patch/src/{parser,
+streaming_parser,file_update,seek_sequence,text_file}.rs at commit
+402f5b6fdf28a7a72c153dbe6fe01e252205d7d6. Eureka supplies its own path
+authorization and sandbox I/O and accepts updates to existing proof files.

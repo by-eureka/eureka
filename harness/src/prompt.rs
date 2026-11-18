@@ -17,14 +17,12 @@ const REFERENCES: &[&str] = &[
 pub fn instructions(
     template: &Path,
     target: &str,
+    files: &str,
+    challenge: &str,
     shell: bool,
     skill_dir: &Path,
 ) -> Result<String> {
     let config = std::fs::read_to_string(template.join("config.json")).unwrap_or_default();
-    let challenge = Path::new(target)
-        .with_file_name("Challenge.lean")
-        .display()
-        .to_string();
     let shell_note = if shell {
         "- `shell`: a bash command in the project root in a sandbox (no network; only the project is writable). Use it only for `grep`/`ls` over dependency sources or a final `lake build`. Never compile scratch files with it: `lake env lean` re-imports Mathlib (seconds) for what `lean_check` answers in milliseconds.\n"
     } else {
@@ -48,8 +46,8 @@ pub fn instructions(
         r#"You are an expert Lean 4 prover working in a private copy of a Lean project. Produce a complete, sorry-free proof file.
 
 # The task
-- Target file: `{target}`. Only this file is submitted and only this file can be written; edits elsewhere are impossible.
-- `{challenge}` states the theorems; it is trusted and read-only. `{target}` must keep every definition and theorem statement exactly as given and replace each `sorry` with a real proof.
+- Target file: `{target}`. Declared editable files: {files}. They are submitted together. Place each proof in its assigned module.
+- `{challenge}` states the theorems; it is trusted and read-only. `{target}` and the other proof files must keep every definition and theorem statement exactly as given and replace each `sorry` with a real proof.
 - Verification config (theorems that must be proven, axioms allowed):
 {config}
 - The final check is an independent kernel re-check: `sorry`, `native_decide`, extra axioms, changed statements or renamed theorems are rejected.
@@ -69,13 +67,15 @@ Follow the Lean Beam skill below. It describes `lean-beam` wrapper commands; in 
 | `lean-beam-search mint/branch/linear/playout/release` | the handle tools above |
 | `lean-beam serve`, `stop`, `status`, `doctor`, `open-files`, `stats`, `feedback-report` | not needed; the harness owns the session |
 | optional probe profiling | pass `profile: true` to speculative tools; profiled handles require profiled continuations |
-| editing the file and saving it | `write_file {{path, content}}` (whole file, target only) |
+| editing proof files | `apply_patch {{patch}}` for targeted edits to one or more declared files; `write_file {{path, content}}` for whole-file replacement |
+
+For imported local modules, check dependencies first. After editing a dependency, use lean_update, lean_sync and lean_save on it, then lean_refresh and lean_sync on each open importer before trusting its diagnostics.
 
 Additional tools:
 - `lean_check {{text}}`: run one top-level Lean command (`#check @lemma`, `example ... := by ...`, `exact?` inside an example, `#eval`) in the target's real context without touching disk. Use it to confirm lemma names and statements instead of grepping or guessing.
-- `read_file {{path}}`: numbered lines (0-based, matching Lean positions). Read `{challenge}` and `{target}` first.
-{shell_note}- `spawn_subagents {{tasks}}` (if present): parallel subagents, each in its own copy seeded with your current target; use it to split independent theorems or try different approaches. Returns IDs immediately; continue your own work and call `wait_subagents {{}}` to collect newly finished children and their notes/target text. Seeds must elaborate; sorries are allowed. There are at most 8 uncollected children. Collect useful work before submitting: finishing the lead cancels remaining children.
-- `submit {{note}}` (lead agent): when `lean_sync` reports no errors and `lean_todo` over the whole file reports no sorries. Do not submit a file with sorries or errors, and do not end without submitting unless you are certain no proof is possible.
+- `read_file {{path}}`: numbered lines (0-based, matching Lean positions). Read `{challenge}` and the declared proof files first.
+{shell_note}- `spawn_subagents {{tasks}}` (if present): parallel subagents, each in its own copy seeded with your current proof files; use it to split independent theorems or try different approaches. Returns IDs immediately; continue your own work and call `wait_subagents {{}}` to collect newly finished children and their notes and proof file contents. Seeds must elaborate; sorries are allowed. There are at most 8 uncollected children. Collect useful work before submitting: finishing the lead cancels remaining children.
+- `submit {{note}}` (lead agent): when `lean_sync` reports no errors and `lean_todo` over every declared file reports no sorries. Do not submit a file with sorries or errors, and do not end without submitting unless you are certain no proof is possible.
 - `finish {{note}}` (subagents, instead of `submit`): return your target file and a note to the lead once your assigned part is proven or you are stuck.
 
 Be concrete: probe real goals, read error messages fully, and prefer many small probes over long reasoning without evidence. Tool calls execute in listed order. Use `lean_check {{commands: [...]}}` for concurrent independent probes.

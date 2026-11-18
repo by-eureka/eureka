@@ -7,8 +7,8 @@
 //! # Contract
 //!
 //! A Pool captures a quiescent, trusted source tree once. Each Attempt gets a
-//! real copy. An attempt submits ONE target file; changes to other files are
-//! intentionally discarded. Frozen owns the submitted bytes in memory. The
+//! real copy. An attempt submits its primary target and any additional files
+//! declared by the controller. Frozen owns the submitted bytes in memory. The
 //! verifier receives a FRESH reconstruction of the trusted tree with only those
 //! bytes substituted. Verified is the only input accepted by publication.
 //!
@@ -185,6 +185,8 @@ pub struct Options {
     /// Names excluded at ANY depth, including build outputs created by Lean.
     /// These names may not appear in a target path.
     pub excluded_names: BTreeSet<String>,
+    /// Additional template files frozen and published alongside the primary target.
+    pub additional_targets: BTreeSet<RelPath>,
 }
 
 impl Default for Options {
@@ -194,6 +196,7 @@ impl Default for Options {
             max_source_bytes: 256 * 1024 * 1024,
             max_entries: 100_000,
             max_depth: 64,
+            additional_targets: BTreeSet::new(),
             excluded_names: [".git", ".lake", "lake-packages", "__pycache__", ".DS_Store"]
                 .into_iter()
                 .map(str::to_owned)
@@ -226,7 +229,7 @@ impl Options {
     fn metadata(&self, policy: &str) -> String {
         // Hex encoding makes embedded newlines unambiguous. This is an identity
         // record, not a digest. Source comparison also uses exact bytes.
-        format!(
+        let mut metadata = format!(
             "{FORMAT}{}\n{}\n{}\n{}\n{}\n{}\n",
             hex(policy.as_bytes()),
             self.max_file_bytes,
@@ -238,7 +241,12 @@ impl Options {
                 .map(|s| hex(s.as_bytes()))
                 .collect::<Vec<_>>()
                 .join(",")
-        )
+        );
+        // Keep existing single-file pools readable.
+        for path in &self.additional_targets {
+            metadata.push_str(&format!("file {}\n", hex(path.as_str().as_bytes())));
+        }
+        metadata
     }
 }
 
@@ -269,9 +277,19 @@ pub struct Verification<'a> {
     root: &'a Path,
     target: &'a RelPath,
     policy: &'a str,
+    pool: &'a Pool,
+    multi_file: bool,
 }
 
 impl Verification<'_> {
+    pub fn is_multi_file(&self) -> bool {
+        self.multi_file
+    }
+
+    /// The trusted pool that owns this verification.
+    pub fn pool(&self) -> &Pool {
+        self.pool
+    }
     pub fn root(&self) -> &Path {
         self.root
     }
@@ -375,15 +393,21 @@ impl Snapshot {
         Ok(Self(entries))
     }
 
-    fn with_candidate(&self, target: &RelPath, bytes: Arc<[u8]>) -> Self {
+    fn with_candidate(&self, files: &BTreeMap<RelPath, Arc<[u8]>>) -> Self {
         let mut result = self.clone();
-        let executable = match self.0.get(target) {
-            Some(Entry::File { executable, .. }) => *executable,
-            _ => 0,
-        };
-        result
-            .0
-            .insert(target.clone(), Entry::File { bytes, executable });
+        for (path, bytes) in files {
+            let executable = match self.0.get(path) {
+                Some(Entry::File { executable, .. }) => *executable,
+                _ => 0,
+            };
+            result.0.insert(
+                path.clone(),
+                Entry::File {
+                    bytes: bytes.clone(),
+                    executable,
+                },
+            );
+        }
         result
     }
 
@@ -501,12 +525,24 @@ impl Pool {
         })))
     }
 
+    /// Materialize the pristine source in a new controller-owned directory.
+    pub fn write_baseline(&self, root: &Path) -> Result<(), Error> {
+        self.0.snapshot.materialize(root, false)
+    }
+
     /// Controller-only path. Do not expose the result store to agents.
     pub fn store(&self) -> &Path {
         &self.0.run
     }
 
     pub fn task(&self, target: RelPath) -> Result<Task, Error> {
+        for path in &self.0.options.additional_targets {
+            if path == &target || !matches!(self.0.snapshot.0.get(path), Some(Entry::File { .. })) {
+                return Err(Error::InvalidConfiguration(format!(
+                    "expected a distinct template file: {path}"
+                )));
+            }
+        }
         if target
             .0
             .split('/')
@@ -609,6 +645,14 @@ impl Task {
         &self.target
     }
 
+    pub fn limits(&self) -> &Options {
+        &self.pool.0.options
+    }
+
+    pub fn targets(&self) -> impl Iterator<Item = &RelPath> {
+        std::iter::once(&self.target).chain(&self.pool.0.options.additional_targets)
+    }
+
     pub fn attempt(&self, agent: impl Into<String>) -> Result<Attempt, Error> {
         let agent = agent.into();
         if agent.len() > MAX_REPORT {
@@ -663,7 +707,7 @@ impl Task {
         self.pool
             .0
             .snapshot
-            .with_candidate(&self.target, verified.frozen.bytes)
+            .with_candidate(&verified.frozen.files)
             .materialize(&stage.path.join("project"), true)?;
         for (name, bytes) in [
             ("policy", self.pool.0.policy.as_bytes()),
@@ -751,15 +795,19 @@ impl Attempt {
     /// The caller must have stopped/joined external writers. Even if a stale
     /// process later writes, Frozen's already captured bytes cannot change.
     pub fn freeze(self) -> Result<Frozen, Error> {
-        let bytes = read_beneath(
-            &self.root(),
-            &self.task.target,
-            self.task.pool.0.options.max_file_bytes,
-        )?;
+        let root = self.root();
+        let limits = &self.task.pool.0.options;
+        let mut files = BTreeMap::new();
+        let mut remaining = limits.max_source_bytes;
+        for path in self.task.targets() {
+            let bytes = read_beneath(&root, path, remaining.min(limits.max_file_bytes))?;
+            remaining -= bytes.len() as u64;
+            files.insert(path.clone(), Arc::from(bytes));
+        }
         let result = Frozen {
             task: self.task.clone(),
             agent: self.agent.clone(),
-            bytes: bytes.into(),
+            files,
         };
         self.dir.cleanup()?;
         Ok(result)
@@ -773,10 +821,11 @@ impl Attempt {
 
 /// Immutable in-memory submission, not a wrapper around a mutable pathname.
 #[must_use]
+#[derive(Clone)]
 pub struct Frozen {
     task: Task,
     agent: String,
-    bytes: Arc<[u8]>,
+    files: BTreeMap<RelPath, Arc<[u8]>>,
 }
 
 impl Frozen {
@@ -784,7 +833,10 @@ impl Frozen {
         &self.task.target
     }
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+        &self.files[self.target()]
+    }
+    pub fn files(&self) -> &BTreeMap<RelPath, Arc<[u8]>> {
+        &self.files
     }
 
     pub fn verify(self) -> Result<Verified, Error> {
@@ -792,9 +844,7 @@ impl Frozen {
         if inner.verifier.policy_id() != inner.policy {
             return Err(Error::PolicyMismatch);
         }
-        let expected = inner
-            .snapshot
-            .with_candidate(&self.task.target, self.bytes.clone());
+        let expected = inner.snapshot.with_candidate(&self.files);
         let dir = inner.scratch("verify")?;
         let root = dir.path.join("project");
         expected.materialize(&root, false)?;
@@ -802,6 +852,8 @@ impl Frozen {
             root: &root,
             target: &self.task.target,
             policy: &inner.policy,
+            pool: &self.task.pool,
+            multi_file: self.files.len() > 1,
         };
         let report = inner.verifier.verify(&input).map_err(|e| match e {
             VerifyError::Rejected(reason) => Error::Rejected(reason),

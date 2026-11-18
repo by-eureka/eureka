@@ -136,19 +136,16 @@ impl Sandbox {
     /// The in-container timer kills the process group, including descendants.
     /// The host watchdog also covers a wedged Docker exec and inherited pipes.
     pub async fn shell(&self, script: &str, timeout: Duration) -> Result<String> {
+        self.timed_command(&["bash", "-c", script], timeout).await
+    }
+
+    /// Run argv directly, with the same limits and process cleanup as the shell tool.
+    pub async fn timed_command(&self, argv: &[&str], timeout: Duration) -> Result<String> {
         let seconds = timeout.as_secs_f64().to_string();
+        let mut args = vec!["--signal=KILL", "--kill-after=2s", &seconds];
+        args.extend_from_slice(argv);
         let mut child = self
-            .command(
-                "timeout",
-                &[
-                    "--signal=KILL",
-                    "--kill-after=2s",
-                    &seconds,
-                    "bash",
-                    "-c",
-                    script,
-                ],
-            )
+            .command("timeout", &args)
             .stdin(Stdio::null())
             .spawn()
             .context("spawn sandbox shell")?;

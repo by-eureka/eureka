@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Re-check a saved candidate with Lean’s bundled verifier, without a model. Publishes it if it passes.
+# Re-check a saved candidate with Lean’s bundled verifier, without a model. Use the candidate/ directory for multi-file attempts. Publishes it if it passes.
 #
 #   scripts/reverify.sh runs/problem runs/mine/store/pool-*/attempts/<id>/candidate.lean runs/recheck
 #

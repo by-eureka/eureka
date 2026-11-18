@@ -111,6 +111,15 @@ scripts/run.sh examples/simple runs/tapis-example \
   --tapis-backend "$PWD/scripts/tapis-pod.py" --cpus 1 --memory-mib 8192
 ```
 
-For independent problems, start one run per template with a distinct output directory. Pass `--agents 2` to give two leads the same problem. Each lead or helper creates a separate pod and uses one pod for its whole attempt, including every Beam call. A helper receives a copy of its parent's current target and returns its candidate and notes through the controller. Choose concurrency and per-pod `--cpus` and `--memory-mib` for your TACC allocation. Set `TAPIS_SCRATCH_MIB` to request and limit writable ephemeral storage per pod in MiB. TACC's nodes also need room to pull and unpack the image.
+For independent problems, start one run per template with a distinct output directory. Pass `--agents 2` to give two leads the same problem. Each lead or helper creates a separate pod and uses one pod for its whole attempt, including every Beam call. A helper receives a copy of all its parent's declared proof files and returns its candidate and notes through the controller. Choose concurrency and per-pod `--cpus` and `--memory-mib` for your TACC allocation. Set `TAPIS_SCRATCH_MIB` to request and limit writable ephemeral storage per pod in MiB. TACC's nodes also need room to pull and unpack the image.
+
+To test multi-file edits and helper isolation on two real TACC pods, set `TAPIS_TOKEN_FILE`, `IMAGE` and `TAPIS_SCRATCH_MIB` as above. The test uses a scripted model on the controller and saves the pod IDs, verification results and cleanup records under `runs/tapis-lifecycle-*`.
+
+```bash
+cargo build --locked --manifest-path harness/Cargo.toml
+HARNESS_PACKAGES="$PWD/lean-packages-dev" HARNESS_IMAGE="$IMAGE" \
+  HARNESS_TAPIS_TEST_BACKEND="$PWD/scripts/tapis-pod.py" \
+  python3 harness/tests/lifecycle.py Lifecycle.test_tapis_multi_file_patch_and_helper_handoff -v
+```
 
 Each attempt records its pod ID and runtime identity under its host artifact directory in `tapis/`. The controller captures the candidate, deletes the pod, and verifies the captured bytes against a fresh trusted template. Helpers return their candidate to the lead. A completed controller cleanup leaves a `deleted` marker. If the controller is lost, `TAPIS_TIME_TO_STOP` bounds the pod lifetime from startup (default 3600 seconds). Remove an orphan from its recorded attempt directory with `scripts/tapis-pod.py delete /path/to/attempt/tapis`. An expired TACC token must be refreshed for cleanup. A pod timeout or loss of its ephemeral storage can lose edits that have not yet been returned.

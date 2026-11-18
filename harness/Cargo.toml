@@ -10,6 +10,8 @@ publish = false
 # Attempt workspaces, verification and winner publication.
 worktrees = { path = "../worktrees" }
 anyhow = "1"
+thiserror = "2"
+tempfile = "3"
 clap = { version = "4", features = ["derive"] }
 eventsource-stream = "0.2"
 futures = "0.3"

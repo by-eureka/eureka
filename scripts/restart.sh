@@ -52,15 +52,18 @@ if len(pools) != 1:
     sys.exit(f"expected one pool in {old}/store; found {len(pools)}")
 template = pools[0] / "source"
 artifacts = pools[0] / "attempts" / attempt
-candidate = artifacts / "candidate.lean"
-if not candidate.is_file() or not (artifacts / "result.json").is_file():
+manifest = template / "proof-files.json"
+paths = json.loads(manifest.read_text()) if manifest.is_file() else []
+multi = len(paths) > 1
+candidate = artifacts / ("candidate" if multi else "candidate.lean")
+if not candidate.exists() or not (artifacts / "result.json").is_file():
     sys.exit(f"no completed attempt with a saved candidate at {artifacts}")
 result = json.loads((artifacts / "result.json").read_text())
 report = artifacts / "verification.txt"
 feedback = report.read_text() if report.exists() else result.get("detail") or ""
 handoff = result.get("note") or result.get("last_message") or ""
 prompt = (
-    "Continue the saved proof in Proofs/Solution.lean. Read it and Proofs/Challenge.lean, "
+    "Continue the saved proof files. Read them and the trusted challenge, "
     "then check the current Lean diagnostics. Preserve the trusted definitions and theorem "
     "statements, except intentional answer holes listed in config.json's definition_names. "
     "Finish all remaining obligations. Do not give up or end with a partial summary. "
@@ -80,14 +83,19 @@ if summaries:
     prompt += ("\n\nLast compaction handoff (last 4000 characters; unverified):\n"
                + latest.read_text()[-4000:]
                + "\nHelpers from the previous run have stopped; their old IDs are no longer active.\n")
-# candidate.lean is frozen after all tools stop, including edits made through shell.
+# Candidates are frozen after all tools stop, including edits made through shell.
 # The last write_file event alone may be older than that final state.
 metadata = {
     "previous_run": str(old), "attempt": attempt,
     "previous_status": result.get("status"), "template": str(template),
-    "seed": str(candidate), "seed_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+    "seed": str(candidate),
     "prompt": prompt,
 }
+if multi:
+    metadata["seed_files_sha256"] = {name: hashlib.sha256((candidate / name).read_bytes()).hexdigest()
+                                     for name in paths}
+else:
+    metadata["seed_sha256"] = hashlib.sha256(candidate.read_bytes()).hexdigest()
 for name, value in {"template": str(template), "seed": str(candidate),
                     "run": str(new), "prompt": prompt}.items():
     (scratch / name).write_text(value)
