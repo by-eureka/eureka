@@ -20,7 +20,7 @@ use worktrees::RelPath;
 // Replies to the model are cut to MAX_OUTPUT. Files up to MAX_READ can still be
 // read and written.
 const MAX_OUTPUT: usize = 64 * 1024;
-const MAX_READ: u64 = 4 * 1024 * 1024;
+use crate::proof_files::MAX_FILE as MAX_READ;
 
 /// Who runs an attempt: the lead verifies and publishes; a subagent only
 /// returns its text to the lead.
@@ -37,6 +37,7 @@ pub struct Ctx {
     pub role: Role,
     pub root: PathBuf,
     pub target: RelPath,
+    pub proof_files: Vec<RelPath>,
     pub beam: Arc<Beam>,
     pub sandbox: Arc<Sandbox>,
     pub trace: Arc<Trace>,
@@ -165,15 +166,92 @@ impl Tool for ReadFile {
     }
 }
 
-/// Writes the target file only. The shell can still change other files in
-/// /work, but those never reach the verifier.
+fn editable<'a>(ctx: &'a Ctx, name: &str) -> Result<&'a RelPath> {
+    ctx.proof_files
+        .iter()
+        .find(|p| p.as_str() == name)
+        .ok_or_else(|| anyhow!("path is outside the declared proof files: {name}"))
+}
+
+pub struct ApplyPatch;
+impl Tool for ApplyPatch {
+    fn spec(&self) -> ToolSpec {
+        spec(
+            "apply_patch",
+            "Edit one or several declared proof files using Codex patch syntax. Use *** Begin Patch, one or more *** Update File: relative/path.lean sections, @@ then lines prefixed by space (context), - (remove), + (add), and *** End Patch. Call lean_update on changed paths.",
+            json!({"type":"object","properties":{"patch":{"type":"string"}},"required":["patch"],"additionalProperties":false}),
+            false,
+        )
+    }
+    fn call<'a>(&'a self, args: Value, ctx: &'a Ctx) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let patch = str_arg(&args, "patch")?;
+            anyhow::ensure!(patch.len() <= MAX_READ as usize, "patch exceeds size limit");
+            let mut edits = std::collections::BTreeMap::new();
+            // Resolve and match every hunk before the first write; repeated sections
+            // for one file see the result of the preceding section.
+            for update in crate::codex_patch::parse(patch)? {
+                let path = editable(ctx, &update.path)?;
+                let (original, current) = match edits.remove(path) {
+                    Some(pair) => pair,
+                    None => {
+                        let text = String::from_utf8(
+                            ctx.sandbox.read_file(&ctx.root, path, MAX_READ).await?,
+                        )?;
+                        (text.clone(), text)
+                    }
+                };
+                let changed = update.apply(&current)?;
+                anyhow::ensure!(
+                    changed.len() <= MAX_READ as usize,
+                    "{path} exceeds size limit"
+                );
+                edits.insert(path, (original, changed));
+            }
+            for (path, (_, content)) in &edits {
+                if let Err(error) = ctx
+                    .sandbox
+                    .write_file(&ctx.root, path, content.as_bytes())
+                    .await
+                {
+                    // A remote write may succeed before its acknowledgement is lost.
+                    // Include the failing path when restoring the pre-patch contents.
+                    for (written, (original, _)) in edits.range::<&RelPath, _>(..=*path).rev() {
+                        if let Err(rollback) = ctx
+                            .sandbox
+                            .write_file(&ctx.root, written, original.as_bytes())
+                            .await
+                        {
+                            ctx.stop.cancel();
+                            bail!(
+                                "write failed at {path}: {error}; cannot restore {written}: {rollback}; attempt stopped"
+                            );
+                        }
+                    }
+                    return Err(
+                        error.context(format!("patch reverted after write failed at {path}"))
+                    );
+                }
+            }
+            Ok(format!(
+                "Updated {}",
+                edits
+                    .keys()
+                    .map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })
+    }
+}
+
 pub struct WriteFile;
 
 impl Tool for WriteFile {
     fn spec(&self) -> ToolSpec {
         spec(
             "write_file",
-            "Replace the full contents of the target file. After writing, call lean_update before probing it again. Only the target file may be written; use lean_check for experiments.",
+            "Replace the full contents of a declared proof file. After writing, call lean_update before probing it again; use lean_check for experiments.",
             json!({"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"], "additionalProperties": false}),
             false,
         )
@@ -182,17 +260,12 @@ impl Tool for WriteFile {
         Box::pin(async move {
             let rel = str_arg(&args, "path")?;
             let content = str_arg(&args, "content")?;
-            if rel != ctx.target.as_str() {
-                bail!(
-                    "only the target file `{}` may be written; use lean_check instead of scratch files",
-                    ctx.target
-                );
-            }
+            let path = editable(ctx, rel)?;
             if content.len() > MAX_READ as usize {
                 bail!("target exceeds {MAX_READ} bytes");
             }
             ctx.sandbox
-                .write_file(&ctx.root, &ctx.target, content.as_bytes())
+                .write_file(&ctx.root, path, content.as_bytes())
                 .await?;
             Ok(format!("wrote {} bytes to {rel}", content.len()))
         })
@@ -249,6 +322,7 @@ impl Tool for LeanCheck {
             "Run Lean commands speculatively in the real context of the target file (same imports and definitions) and return Lean's messages, in milliseconds. Use it to check lemma statements (`#check @Nat.gcd_comm`), search (`exact?` inside an `example`), evaluate (`#eval`), or test a whole `example : ... := by ...`. Each command must be a single top-level command (one `#check` checks one term); pass several in `commands` and they run concurrently. The command runs just before the last declaration of the file, so every earlier definition and lemma is in scope. Nothing is written to disk. Never create scratch files or run `lake env lean` for this.",
             json!({"type": "object", "properties": {
                 "text": {"type": "string", "description": "One top-level Lean command."},
+                "path": {"type": "string", "description": "Declared proof file; defaults to the primary target."},
                 "commands": {"type": "array", "items": {"type": "string"}, "maxItems": 32, "description": "Several independent top-level commands, run concurrently."}
             }, "additionalProperties": false}),
             true,
@@ -275,12 +349,13 @@ impl Tool for LeanCheck {
             if commands.len() > 32 {
                 bail!("at most 32 commands per lean_check");
             }
-            let path = ctx.target.as_str();
-            let source = String::from_utf8(
-                ctx.sandbox
-                    .read_file(&ctx.root, &ctx.target, MAX_READ)
-                    .await?,
-            )?;
+            let file = match args.get("path") {
+                Some(_) => editable(ctx, str_arg(&args, "path")?)?,
+                None => &ctx.target,
+            };
+            let path = file.as_str();
+            let source =
+                String::from_utf8(ctx.sandbox.read_file(&ctx.root, file, MAX_READ).await?)?;
             // Command-mode probes need a command start. The start of the last
             // top-level declaration sees everything declared before it.
             let line = command_line(&source);
@@ -326,7 +401,7 @@ impl Tool for Submit {
     fn spec(&self) -> ToolSpec {
         spec(
             "submit",
-            "Submit the current target file for verification and end the session. Call only after lean_sync reports no errors and lean_todo reports no sorries in the target.",
+            "Submit all declared proof files for verification and end the session. Call only after lean_sync reports no errors and lean_todo reports no remaining proof obligations.",
             json!({"type": "object", "properties": {"note": {"type": "string", "description": "Short summary of the approach."}}, "additionalProperties": false}),
             false,
         )
@@ -352,7 +427,7 @@ impl Tool for Finish {
     fn spec(&self) -> ToolSpec {
         spec(
             "finish",
-            "End your session and return the current target file to the lead agent. Call when your assigned part is proven (lean_sync shows no errors in it) or when you cannot make further progress; say which in the note. Nothing is verified or published at this level.",
+            "End your session and return the declared proof files to the lead agent. Call when your assigned part is proven (lean_sync shows no errors in it) or when you cannot make further progress; say which in the note. Nothing is verified or published at this level.",
             json!({"type": "object", "properties": {"note": {"type": "string", "description": "What was proven, what remains, and anything the lead should know."}}, "required": ["note"], "additionalProperties": false}),
             false,
         )

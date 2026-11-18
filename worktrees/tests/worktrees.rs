@@ -545,3 +545,41 @@ fn store_inside_template_is_rejected_before_mutation() {
     ));
     assert_eq!(fs::read_dir(&f.source).unwrap().count(), 3);
 }
+
+#[test]
+fn additional_files_are_frozen_together_and_bound_to_pool_metadata() {
+    let f = Fixture::new();
+    let extra = RelPath::new("Aux.lean").unwrap();
+    fs::write(f.source.join(extra.as_path()), b"original").unwrap();
+    let options = Options {
+        additional_targets: [extra.clone()].into(),
+        ..Options::default()
+    };
+    let pool = Pool::create(&f.source, &f.store, options.clone(), Arc::new(Accept)).unwrap();
+    let t = task(&pool);
+    let mut attempt = t.attempt("pair").unwrap();
+    fs::write(attempt.root().join("Challenge.lean"), b"discard this").unwrap();
+    fs::write(attempt.root().join(extra.as_path()), b"second").unwrap();
+    attempt.write(b"first").unwrap();
+    let frozen = attempt.freeze().unwrap();
+    assert_eq!(frozen.files()[&extra].as_ref(), b"second");
+    t.publish(frozen.verify().unwrap()).unwrap();
+    let reopened = Pool::open(pool.store(), options, Arc::new(Accept)).unwrap();
+    let published = task(&reopened).winner().unwrap().unwrap();
+    assert_eq!(fs::read(published.file()).unwrap(), b"first");
+    assert_eq!(
+        fs::read(published.root().join(extra.as_path())).unwrap(),
+        b"second"
+    );
+    assert_eq!(
+        fs::read(published.root().join("Challenge.lean")).unwrap(),
+        b"trusted challenge"
+    );
+    assert!(matches!(
+        Pool::open(pool.store(), Options::default(), Arc::new(Accept)),
+        Err(Error::PolicyMismatch)
+    ));
+    let incomplete = t.attempt("missing file").unwrap();
+    fs::remove_file(incomplete.root().join(extra.as_path())).unwrap();
+    assert!(incomplete.freeze().is_err());
+}

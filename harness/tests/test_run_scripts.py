@@ -104,6 +104,21 @@ class RunScripts(unittest.TestCase):
         self.assertIn('old IDs are no longer active', metadata['prompt'])
         self.assertEqual(metadata['seed_sha256'], hashlib.sha256(b'saved proof state').hexdigest())
 
+        paths = ['A.lean', 'Lib/B.lean']
+        (pool / 'source' / 'proof-files.json').write_text(json.dumps(paths))
+        bundle = attempt / 'candidate'
+        (bundle / 'Lib').mkdir(parents=True)
+        for name in paths:
+            (bundle / name).write_text(name)
+        new = root / 'multi'
+        result = subprocess.run([str(scripts / 'restart.sh'), str(self.run), str(new)],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metadata = json.loads((new / 'restart.json').read_text())
+        self.assertEqual(metadata['seed'], str(bundle))
+        self.assertEqual(metadata['seed_files_sha256'], {name: hashlib.sha256(name.encode()).hexdigest()
+                                                         for name in paths})
+
 
 if __name__ == '__main__':
     unittest.main()

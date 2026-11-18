@@ -80,6 +80,29 @@ cp runs/problem/Proofs/Challenge.lean runs/problem/Proofs/Solution.lean
 Set `theorem_names` in `runs/problem/config.json` to the fully qualified names, e.g. `MyProblem.main_theorem`.
 Then read through `Challenge.lean` carefully. Those statements are exactly what the verifier checks.
 
+### Problems with several proof files
+
+Add `proof-files.json` at the template root. List existing Lean sources in workspace-relative paths, for example:
+
+```json
+["ExprEval/Basic.lean", "ExprEval/Lemmas.lean"]
+```
+
+The first entry is the default for file-specific tools. The agent can read the project and use a Codex `apply_patch` call to edit several listed files. One attempt owns the entire workspace. Set `solution_module` in `config.json` to a module that imports the proofs, and list **every required declaration** in `theorem_names` or `definition_names`, including independent obligations in imported files. The comparator checks these declarations against a reference built from the original template. For templates without a manifest, the default target is `Proofs/Solution.lean`.
+
+Multi-file attempts save sources under `attempts/<id>/candidate/` using their original paths. Pass that directory to `--seed` or `scripts/reverify.sh`. The winning `project/` contains the full verified project.
+
+To prepare VeriSoftBench tasks from the same repository, use Python 3.11+ and checkouts that contain the pinned commits:
+
+```bash
+git clone https://github.com/utopia-group/VeriSoftBench.git
+git clone https://github.com/Paul-Passeron/LeanExprEvaluator.git
+scripts/prepare-verisoftbench.py VeriSoftBench LeanExprEvaluator runs/expressions --tasks 266 270
+scripts/run.sh runs/expressions runs/expressions-run
+```
+
+The preparer removes the selected proof bodies in their original files and uses the package snapshot shipped in the dev pod image. It supports root-layout Lean libraries declared in `lakefile.toml` with dependencies available in the dev runtime. It stops if the benchmark statement and proof do not match the pinned source exactly. Eureka builds the trusted challenge on its dev toolchain before the first model request. Projects that use incompatible Lean syntax, tactics or dependencies need a port. For benchmark comparisons, replay the submitted proofs with the upstream verifier and project toolchain.
+
 ## Running
 
 Set the endpoint and model. On Vista, use the current deployment's URL and key; the port

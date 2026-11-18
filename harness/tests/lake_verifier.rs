@@ -9,8 +9,11 @@ struct Fixture(PathBuf);
 
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("lake-verifier-{}", std::process::id()));
-        fs::create_dir(&root).unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("lake-verifier-")
+            .tempdir()
+            .unwrap()
+            .keep();
         fs::create_dir(root.join("template")).unwrap();
         let template = root.join("template");
         fs::write(
@@ -155,4 +158,60 @@ fn bundled_verifier_enforces_the_trust_boundary() {
     );
     fs::write(template.join("config.json"), "{}").unwrap();
     assert!(LeanVerifier::from_template(&template).is_err());
+}
+
+#[test]
+#[ignore = "requires installed Lean 4.35, Bubblewrap and a systemd user session"]
+fn independently_checks_each_named_theorem_against_the_unedited_project() {
+    let fixture = Fixture::new();
+    let template = fixture.0.join("template");
+    let helper = RelPath::new("Proofs/Helper.lean").unwrap();
+    let primary = RelPath::new("Proofs/Candidate.lean").unwrap();
+    let goal = "theorem helper : 1 + 1 = 2 := ";
+    let root = "import Proofs.Helper\ntheorem another : True := ";
+    fs::write(template.join(helper.as_path()), format!("{goal}by sorry")).unwrap();
+    fs::write(template.join(primary.as_path()), format!("{root}by sorry")).unwrap();
+    // Both comparator roots import an editable dependency. The reference must
+    // still see its *original* statement. The second theorem is independent.
+    fs::write(
+        template.join("Proofs/Challenge.lean"),
+        format!("{root}by sorry"),
+    )
+    .unwrap();
+    fs::write(template.join("config.json"), r#"{"challenge_module":"Proofs.Challenge","solution_module":"Proofs.Candidate","theorem_names":["helper","another"],"permitted_axioms":["propext","Quot.sound","Classical.choice"]}"#).unwrap();
+    let verifier = LeanVerifier::from_template(&template).unwrap();
+    let options = Options {
+        additional_targets: [helper.clone()].into(),
+        ..Options::default()
+    };
+    let store = fixture.0.join("store");
+    fs::create_dir(&store).unwrap();
+    let pool = Pool::create(&template, &store, options, Arc::new(verifier)).unwrap();
+    let task = pool.task(primary).unwrap();
+    for (proof, expected) in [
+        (format!("{goal}rfl"), true),
+        (format!("{goal}by sorry"), false),
+        ("theorem helper : True := trivial".into(), false),
+    ] {
+        let mut attempt = task.attempt("pair").unwrap();
+        attempt.write(format!("{root}trivial").as_bytes()).unwrap();
+        worktrees::replace_beneath(&attempt.root(), &helper, proof.as_bytes()).unwrap();
+        let result = attempt.freeze().unwrap().verify();
+        if expected {
+            let winner = match task.publish(result.unwrap()).unwrap() {
+                worktrees::PublishOutcome::Committed(p) => p,
+                _ => panic!("unexpected winner"),
+            };
+            assert_eq!(
+                fs::read_to_string(winner.root().join(helper.as_path())).unwrap(),
+                proof
+            );
+        } else {
+            assert!(
+                matches!(result, Err(Error::Rejected(_))),
+                "{:?}",
+                result.err()
+            );
+        }
+    }
 }

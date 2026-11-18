@@ -2,18 +2,20 @@
 //!
 //! `run_attempt` takes every attempt through the same steps: copy the template,
 //! write the seed, start and attach a sandbox, run the agent, cancel and join
-//! its helpers, stop the sandbox, freeze the target, save candidate.lean, and
+//! its helpers, stop the sandbox, freeze and save the declared proof files, and
 //! verify it if a lead submitted. The file is frozen only after every writer
 //! has stopped, and saved before the verifier runs. Helpers never publish; the
-//! lead gets their file back as text. Attempts save their files under
+//! lead gets their proof sources back. Attempts save their files under
 //! `<pool>/attempts/<id>/`, which no sandbox can see.
 use crate::agent::{self, AgentConfig, Outcome};
 use crate::beam::{Beam, ExtraServer, ToolSpec};
+use crate::proof_files::{self, MAX_FILE, Sources};
 use crate::responses::{Client, Usage};
 use crate::runtime;
 use crate::sandbox::{Sandbox, SandboxSpec, WORK};
 use crate::tools::{
-    BeamTool, Ctx, ExtraTool, Finish, LeanCheck, ReadFile, Role, Shell, Submit, Tool, WriteFile,
+    ApplyPatch, BeamTool, Ctx, ExtraTool, Finish, LeanCheck, ReadFile, Role, Shell, Submit, Tool,
+    WriteFile,
 };
 use crate::trace::{Trace, artifact};
 use anyhow::{Context, Result, anyhow, bail};
@@ -58,6 +60,8 @@ pub struct AttemptResult {
     pub note: Option<String>,
     pub last_message: Option<String>,
     pub target_text: Option<String>,
+    pub files: Sources,
+    pub candidate: Option<PathBuf>,
     pub artifacts: PathBuf,
 }
 
@@ -84,7 +88,7 @@ impl AttemptResult {
         json!({"id": self.id, "label": self.label, "status": status, "detail": detail,
             "submitted": self.submitted, "turns": self.turns, "usage": self.usage,
             "termination": self.termination, "note": self.note, "last_message": self.last_message,
-            "candidate": self.target_text.as_ref().map(|_| self.artifacts.join("candidate.lean"))})
+            "candidate": self.candidate})
     }
 }
 
@@ -133,6 +137,7 @@ impl Harness {
         tools.extend([
             Arc::new(LeanCheck) as Arc<dyn Tool>,
             Arc::new(ReadFile),
+            Arc::new(ApplyPatch),
             Arc::new(WriteFile),
         ]);
         if self.shell {
@@ -167,7 +172,7 @@ impl Harness {
         id: String,
         label: String,
         prompt: String,
-        seed: Option<String>,
+        seed: Option<Sources>,
         role: Role,
         stop: CancellationToken,
     ) -> BoxFuture<'a, Result<AttemptResult>> {
@@ -183,9 +188,15 @@ impl Harness {
             let attempt_id = id.clone();
             // worktrees is synchronous and copies the whole project.
             let attempt = tokio::task::spawn_blocking(move || -> Result<_> {
-                let mut attempt = task.attempt(attempt_id)?;
+                let attempt = task.attempt(attempt_id)?;
                 if let Some(seed) = seed {
-                    attempt.write(seed.as_bytes())?;
+                    for (path, text) in seed {
+                        anyhow::ensure!(
+                            task.targets().any(|allowed| allowed == &path),
+                            "invalid seed path {path}"
+                        );
+                        worktrees::replace_beneath(&attempt.root(), &path, text.as_bytes())?;
+                    }
                 }
                 Ok(attempt)
             })
@@ -201,6 +212,28 @@ impl Harness {
             let mut outcome = match async {
                 let s = Arc::new(Sandbox::create(&self.sandbox, &id, &root).await?);
                 sandbox = Some(s.clone());
+                if self.task.targets().count() > 1 {
+                    // Cold workspaces have no local .oleans for Beam to import.
+                    // A seed with a proof error can still be repaired by the model.
+                    let modules: Vec<_> = self
+                        .task
+                        .targets()
+                        .map(|p| {
+                            format!(
+                                "+{}",
+                                p.as_str()
+                                    .strip_suffix(".lean")
+                                    .unwrap_or(p.as_str())
+                                    .replace('/', ".")
+                            )
+                        })
+                        .collect();
+                    let mut args = vec!["lake", "build"];
+                    args.extend(modules.iter().map(String::as_str));
+                    let build = s.timed_command(&args, self.shell_timeout).await?;
+                    self.trace
+                        .event(&id, "initial_build", json!({"output": build}));
+                }
                 let beam = tokio::time::timeout(
                     Duration::from_secs(30),
                     Beam::spawn(runtime::mcp(&s), WORK),
@@ -218,6 +251,7 @@ impl Harness {
                     role,
                     root: root.clone(),
                     target: self.task.target().clone(),
+                    proof_files: self.task.targets().cloned().collect(),
                     beam: beam.clone(),
                     sandbox: s.clone(),
                     trace: self.trace.clone(),
@@ -278,7 +312,13 @@ impl Harness {
                 outcome.error = Some(format!("child cleanup: {error:#}"));
             }
             let capture = if let Some(sandbox) = &sandbox {
-                sandbox.collect_target(&root, self.task.target()).await
+                async {
+                    for path in self.task.targets() {
+                        sandbox.collect_target(&root, path).await?;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }
+                .await
             } else {
                 Ok(())
             };
@@ -300,7 +340,7 @@ impl Harness {
                 );
             }
             self.usage.lock().unwrap().add(&outcome.usage);
-            // Keeps only the target file; the rest of the workspace is discarded.
+            // Freeze the declared proof files after all sandbox writers stop.
             let frozen = tokio::task::spawn_blocking(move || {
                 capture?;
                 attempt.freeze().context("freeze target")
@@ -317,11 +357,20 @@ impl Harness {
                 note,
                 last_message: outcome.last_message,
                 target_text: None,
+                files: Sources::new(),
+                candidate: None,
                 artifacts,
             };
             let frozen = match frozen {
                 Ok(frozen) => {
-                    artifact(&result.artifacts.join("candidate.lean"), frozen.bytes())?;
+                    result.candidate = Some(proof_files::save(&frozen, &result.artifacts)?);
+                    if role == Role::Subagent && frozen.files().len() > 1 {
+                        for (path, bytes) in frozen.files() {
+                            result
+                                .files
+                                .insert(path.clone(), String::from_utf8(bytes.to_vec())?);
+                        }
+                    }
                     result.target_text = Some(String::from_utf8(frozen.bytes().to_vec())?);
                     Some(frozen)
                 }
@@ -349,9 +398,9 @@ impl Harness {
                     self.trace.event(
                         &id,
                         "verification_start",
-                        json!({"candidate": result.artifacts.join("candidate.lean")}),
+                        json!({"candidate": result.candidate}),
                     );
-                    match verify_candidate(self.task.clone(), frozen, &result.artifacts).await {
+                    match verify_candidate(frozen, &result.artifacts).await {
                         Ok(v) => Verdict::Verified(v),
                         Err(Error::Rejected(report)) => Verdict::Rejected(report),
                         Err(error) => Verdict::Failed(format!("verify: {error}")),
@@ -403,14 +452,14 @@ impl Harness {
         self: &Arc<Self>,
         n: usize,
         prompt: &str,
-        seed: Option<&str>,
+        seed: Option<&Sources>,
     ) -> Result<Option<Published>> {
         let mut running = JoinSet::new();
         for i in 1..=n {
             let h = self.clone();
             let id = self.id();
             let prompt = prompt.to_owned();
-            let seed = seed.map(str::to_owned);
+            let seed = seed.cloned();
             running.spawn(async move {
                 h.run_attempt(
                     id,
@@ -476,12 +525,11 @@ impl Harness {
 
 /// Retry only operational verifier failures, once, using the identical saved bytes
 /// in another fresh trusted tree. Both reports survive regardless of the verdict.
-pub async fn verify_candidate(task: Task, frozen: Frozen, dir: &Path) -> Result<Verified, Error> {
-    let mut frozen = frozen;
+pub async fn verify_candidate(frozen: Frozen, dir: &Path) -> Result<Verified, Error> {
     let mut reports = String::new();
     for round in 1..=2 {
         // `verify` consumes `frozen`, so keep the bytes for a retry.
-        let bytes = frozen.bytes().to_vec();
+        let frozen = frozen.clone();
         let result = tokio::task::spawn_blocking(move || frozen.verify())
             .await
             .map_err(|e| Error::VerifierFailed(std::io::Error::other(e.to_string())))?;
@@ -495,9 +543,6 @@ pub async fn verify_candidate(task: Task, frozen: Frozen, dir: &Path) -> Result<
         if round == 2 || !matches!(result, Err(Error::VerifierFailed(_))) {
             return result;
         }
-        let mut attempt = task.attempt("verification-retry")?;
-        attempt.write(&bytes)?;
-        frozen = attempt.freeze()?;
     }
     unreachable!()
 }
@@ -511,9 +556,9 @@ struct Subagents {
 impl Tool for Subagents {
     fn spec(&self) -> ToolSpec {
         if self.wait {
-            return ToolSpec { name: "wait_subagents".into(), description: "Wait up to 30 seconds for a child to finish; return newly completed results (including notes and target text), plus the remaining count. You may continue your own work and call again. Each result is delivered once and also saved as an artifact.".into(), input_schema: json!({"type": "object", "properties": {}, "additionalProperties": false}), read_only: false };
+            return ToolSpec { name: "wait_subagents".into(), description: "Wait up to 30 seconds for a child to finish; return newly completed results (including notes and proof file contents), plus the remaining count. You may continue your own work and call again. Each result is delivered once and also saved as an artifact.".into(), input_schema: json!({"type": "object", "properties": {}, "additionalProperties": false}), read_only: false };
         }
-        ToolSpec { name: "spawn_subagents".into(), description: "Start subagents in private projects seeded with your current target. First checks that the seed elaborates (sorries allowed). Returns IDs immediately; use wait_subagents to collect results while continuing your own work. At most 8 uncollected children. Submit/termination cancels and joins remaining children; collect their work first.".into(), input_schema: json!({"type": "object", "properties": {"tasks": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "object", "properties": {"label": {"type": "string"}, "instructions": {"type": "string"}}, "required": ["label", "instructions"], "additionalProperties": false}}}, "required": ["tasks"], "additionalProperties": false}), read_only: false }
+        ToolSpec { name: "spawn_subagents".into(), description: "Start subagents in private projects seeded with your current proof files. First checks that the seed elaborates (sorries allowed). Returns IDs immediately; use wait_subagents to collect results while continuing your own work. At most 8 uncollected children. Submit/termination cancels and joins remaining children; collect their work first.".into(), input_schema: json!({"type": "object", "properties": {"tasks": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "object", "properties": {"label": {"type": "string"}, "instructions": {"type": "string"}}, "required": ["label", "instructions"], "additionalProperties": false}}}, "required": ["tasks"], "additionalProperties": false}), read_only: false }
     }
     fn call<'a>(&'a self, args: Value, ctx: &'a Ctx) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
@@ -559,24 +604,24 @@ impl Tool for Subagents {
                 })
                 .collect::<Result<_>>()?;
             // Don't hand every helper the same broken file. Sorries are fine.
-            let sync = ctx.beam.call("lean_sync", &json!({"path": ctx.target.as_str(), "diagnostic_scope": "all", "diagnostics_in_result": true})).await?;
-            let diagnostics: Value =
-                serde_json::from_str(&sync).with_context(|| format!("seed sync failed: {sync}"))?;
-            if diagnostics
-                .pointer("/diagnostics/counts/error")
-                .and_then(Value::as_u64)
-                != Some(0)
-                || diagnostics.pointer("/readiness/save_ready") != Some(&json!(true))
-            {
-                bail!(
-                    "repair the seed before spawning; sorries are allowed, elaboration errors are not: {sync}"
-                );
+            let mut seed = Sources::new();
+            for path in &ctx.proof_files {
+                let sync = ctx.beam.call("lean_sync", &json!({"path": path.as_str(), "diagnostic_scope": "all", "diagnostics_in_result": true})).await?;
+                let diagnostics: Value = serde_json::from_str(&sync)
+                    .with_context(|| format!("seed sync failed: {sync}"))?;
+                if diagnostics
+                    .pointer("/diagnostics/counts/error")
+                    .and_then(Value::as_u64)
+                    != Some(0)
+                    || diagnostics.pointer("/readiness/save_ready") != Some(&json!(true))
+                {
+                    bail!(
+                        "repair the seed in {path} before spawning; sorries are allowed, elaboration errors are not: {sync}"
+                    );
+                }
+                let bytes = ctx.sandbox.read_file(&ctx.root, path, MAX_FILE).await?;
+                seed.insert(path.clone(), String::from_utf8(bytes)?);
             }
-            let seed = String::from_utf8(
-                ctx.sandbox
-                    .read_file(&ctx.root, &ctx.target, 4 * 1024 * 1024)
-                    .await?,
-            )?;
             let mut ids = Vec::new();
             for (label, prompt) in tasks {
                 let id = harness.id();
@@ -596,12 +641,21 @@ impl Tool for Subagents {
     }
 }
 
-// The lead gets the helper's file as text and decides what to merge.
+// The lead decides which returned proof edits to adopt.
 fn child_report(joined: Result<Result<AttemptResult>, tokio::task::JoinError>) -> Value {
     match joined.map_err(anyhow::Error::from).and_then(|r| r) {
         Ok(r) => {
             let mut report = r.report();
             report["target_text"] = json!(r.target_text);
+            if !r.files.is_empty() {
+                report["files"] = serde_json::to_value(
+                    r.files
+                        .iter()
+                        .map(|(p, text)| (p.as_str(), text))
+                        .collect::<std::collections::BTreeMap<_, _>>(),
+                )
+                .expect("strings serialize");
+            }
             report
         }
         Err(e) => json!({"status": "failed", "detail": format!("{e:#}")}),
@@ -624,6 +678,10 @@ mod tests {
                 std::fs::read(input.root().join("Solution.lean")).unwrap(),
                 b"saved candidate"
             );
+            assert_eq!(
+                std::fs::read(input.root().join("Helper.lean")).unwrap(),
+                b"saved helper"
+            );
             if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                 Err(VerifyError::Operational(std::io::Error::other(
                     "deliberate crash",
@@ -643,24 +701,30 @@ mod tests {
         std::fs::create_dir(&source).unwrap();
         std::fs::create_dir(&store).unwrap();
         std::fs::write(source.join("Solution.lean"), "original").unwrap();
+        std::fs::write(source.join("Helper.lean"), "original helper").unwrap();
         let pool = Pool::create(
             &source,
             &store,
-            Options::default(),
+            Options {
+                additional_targets: [RelPath::new("Helper.lean").unwrap()].into(),
+                ..Options::default()
+            },
             Arc::new(CrashOnce(AtomicU64::new(0))),
         )
         .unwrap();
         let task = pool.task(RelPath::new("Solution.lean").unwrap()).unwrap();
         let mut attempt = task.attempt("test").unwrap();
         attempt.write(b"saved candidate").unwrap();
+        std::fs::write(attempt.root().join("Helper.lean"), "saved helper").unwrap();
         let frozen = attempt.freeze().unwrap();
-        artifact(&dir.join("candidate.lean"), frozen.bytes()).unwrap();
-        let verified = verify_candidate(task, frozen, &dir).await.unwrap();
+        let saved = proof_files::save(&frozen, &dir).unwrap();
+        assert_eq!(proof_files::load(&task, &saved).unwrap().len(), 2);
+        let verified = verify_candidate(frozen, &dir).await.unwrap();
         assert_eq!(verified.report(), "checked on retry");
         let report = std::fs::read_to_string(dir.join("verification.txt")).unwrap();
         assert!(report.contains("deliberate crash") && report.contains("checked on retry"));
         assert_eq!(
-            std::fs::read(dir.join("candidate.lean")).unwrap(),
+            std::fs::read(saved.join("Solution.lean")).unwrap(),
             b"saved candidate"
         );
         drop(verified);

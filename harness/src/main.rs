@@ -11,13 +11,13 @@ use harness::responses::{Client, ModelConfig};
 use harness::runtime;
 use harness::sandbox::SandboxSpec;
 use harness::search::Harness;
-use harness::{prompt, trace, verify};
+use harness::{prompt, proof_files, trace, verify};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use worktrees::{Options, Pool, RelPath};
+use worktrees::{Options, Pool};
 
 /// Prove the theorems of a Lean project template with parallel LLM agents.
 ///
@@ -32,9 +32,9 @@ struct Cli {
     /// Directory for pools, attempts and results (must exist; keep it private).
     #[arg(long)]
     store: PathBuf,
-    /// File the agents may change, relative to the template root.
-    #[arg(long, default_value = "Proofs/Solution.lean")]
-    target: String,
+    /// Primary proof file (first manifest entry, or Proofs/Solution.lean for legacy templates).
+    #[arg(long)]
+    target: Option<String>,
     /// Number of independent top-level agents.
     #[arg(short = 'n', long, default_value_t = 1)]
     agents: usize,
@@ -85,10 +85,10 @@ struct Cli {
     /// Extra stdio MCP server JSON config (name, command, args); runs in each sandbox.
     #[arg(long)]
     mcp: Vec<PathBuf>,
-    /// Seed each lead with this saved target, keeping the trusted template unchanged.
+    /// Seed each lead with a saved target file or multi-file candidate directory, keeping the trusted template unchanged.
     #[arg(long)]
     seed: Option<PathBuf>,
-    /// Reverify a saved target without calling a model or starting an agent sandbox.
+    /// Reverify a saved file or multi-file candidate directory without calling a model or starting an agent sandbox.
     #[arg(long, conflicts_with = "seed")]
     verify_only: Option<PathBuf>,
     /// JSONL trace file.
@@ -115,11 +115,28 @@ async fn main() -> Result<()> {
     runtime::validate_packages(&template, &packages)?;
     let mut verifier = verify::LeanVerifier::from_template(&template)?;
     verifier.deps = Some(packages.clone());
-    let mut options = Options::default();
+    let (primary, additional) =
+        proof_files::scope(&template, cli.target.as_deref(), &verifier.challenge_path())?;
+    let primary_name = primary.as_str().to_owned();
+    let multi = !additional.is_empty();
+    let instructions_files = std::iter::once(&primary)
+        .chain(&additional)
+        .map(|p| p.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let challenge = verifier.challenge_path();
+    let mut options = Options {
+        additional_targets: additional,
+        ..Options::default()
+    };
     // Beam keeps per-attempt session state in .beam; it isn't part of the project.
     options.excluded_names.insert(".beam".into());
-    let pool = Pool::create(&template, &cli.store, options, Arc::new(verifier))?;
-    let task = pool.task(RelPath::new(&cli.target)?)?;
+    let verifier = Arc::new(verifier);
+    let pool = Pool::create(&template, &cli.store, options, verifier.clone())?;
+    verifier
+        .prepare(&pool)
+        .context("prepare trusted reference before starting attempts")?;
+    let task = pool.task(primary)?;
     let run_id = pool
         .store()
         .file_name()
@@ -132,25 +149,35 @@ async fn main() -> Result<()> {
     if let Some(candidate) = &cli.verify_only {
         // Re-check a saved file. No model or sandbox is involved, so this
         // happens before the API key is read.
-        let bytes = std::fs::read(candidate)?;
+        let files = proof_files::load(&task, candidate)?;
         let dir = artifacts.join("reverification");
         std::fs::create_dir(&dir)?;
-        trace::artifact(&dir.join("candidate.lean"), &bytes)?;
-        let mut attempt = task.attempt("reverification")?;
-        attempt.write(&bytes)?;
+        let attempt = task.attempt("reverification")?;
+        for (path, source) in files {
+            worktrees::replace_beneath(&attempt.root(), &path, source.as_bytes())?;
+        }
         let frozen = attempt.freeze()?;
-        let result = harness::search::verify_candidate(task.clone(), frozen, &dir).await;
+        let candidate = proof_files::save(&frozen, &dir)?;
+        let result = harness::search::verify_candidate(frozen, &dir).await;
         trace::artifact(
             &dir.join("result.json"),
             &serde_json::to_vec_pretty(&serde_json::json!({
                 "status": match &result { Ok(_) => "verified", Err(worktrees::Error::Rejected(_)) => "rejected", Err(_) => "failed" },
-                "detail": result.as_ref().err().map(ToString::to_string), "candidate": dir.join("candidate.lean")
+                "detail": result.as_ref().err().map(ToString::to_string), "candidate": candidate
             }))?,
         )?;
         let published = match task.publish(result?)? {
             worktrees::PublishOutcome::Committed(p) | worktrees::PublishOutcome::AlreadyWon(p) => p,
         };
-        println!("VERIFIED {}", published.file().display());
+        println!(
+            "VERIFIED {}",
+            if multi {
+                published.root()
+            } else {
+                published.file()
+            }
+            .display()
+        );
         return Ok(());
     }
     anyhow::ensure!(cli.agents > 0, "--agents must be positive");
@@ -174,7 +201,11 @@ async fn main() -> Result<()> {
         runtime::validate_image(&cli.image, &template).await?
     };
     // A seed only sets the starting file; the conversation starts fresh.
-    let seed = cli.seed.as_ref().map(std::fs::read_to_string).transpose()?;
+    let seed = cli
+        .seed
+        .as_ref()
+        .map(|p| proof_files::load(&task, p))
+        .transpose()?;
     let api_key = std::env::var("DEEPSEEK_API_KEY")
         .or_else(|_| std::env::var("OPENAI_API_KEY"))
         .context("set DEEPSEEK_API_KEY or OPENAI_API_KEY")?;
@@ -211,8 +242,14 @@ async fn main() -> Result<()> {
             dont_give_up: cli.dont_give_up,
         },
         instructions: {
-            let mut text =
-                prompt::instructions(&template, &cli.target, !cli.no_shell, &cli.beam_skill)?;
+            let mut text = prompt::instructions(
+                &template,
+                &primary_name,
+                &instructions_files,
+                &challenge,
+                !cli.no_shell,
+                &cli.beam_skill,
+            )?;
             if cli.dont_give_up {
                 // The loop also continues text-only replies; --max-turns still applies.
                 text.push_str("\n\nThis statement is definitely provable as stated. Do not give up and do not end the session without a verified submission: if one approach stalls, try another, split the hard claim among subagents, and keep going.\n");
@@ -234,8 +271,8 @@ async fn main() -> Result<()> {
 
     let prompt = cli.prompt.unwrap_or_else(|| {
         format!(
-            "Prove every theorem listed in config.json in `{}`. Start by reading the files and probing the goals.",
-            cli.target
+            "Prove every theorem listed in config.json across these proof files: {}. Start by reading the files and probing the goals.",
+            instructions_files
         )
     });
     let stop = harness.stop.clone();
@@ -248,12 +285,20 @@ async fn main() -> Result<()> {
         stop.cancel();
     });
     let result = harness
-        .independent(cli.agents, &prompt, seed.as_deref())
+        .independent(cli.agents, &prompt, seed.as_ref())
         .await;
     signals.abort();
     match result? {
         Some(published) => {
-            println!("VERIFIED {}", published.file().display());
+            println!(
+                "VERIFIED {}",
+                if multi {
+                    published.root()
+                } else {
+                    published.file()
+                }
+                .display()
+            );
             println!("{}", published.report()?);
             Ok(())
         }

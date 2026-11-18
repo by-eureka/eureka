@@ -305,6 +305,60 @@ class Lifecycle(unittest.TestCase):
         remaining = subprocess.check_output(['docker', 'ps', '-aq', '--filter', f'label=harness.run={run_id}'], text=True)
         self.assertFalse(remaining.strip(), 'orphan containers')
 
+    def test_multi_file_patch_and_helper_handoff(self):
+        template = self.dir / 'template'
+        shutil.copytree(ROOT / 'examples/core', template)
+        self.args[self.args.index('--template') + 1] = str(template)
+        primary, helper = 'Proofs/Solution.lean', 'Proofs/Helper.lean'
+        (template / 'proof-files.json').write_text(json.dumps([primary, helper]))
+        config = json.loads((template / 'config.json').read_text())
+        config['theorem_names'] = ['first', 'second']
+        (template / 'config.json').write_text(json.dumps(config))
+        first, second = 'theorem first : True := by sorry', 'theorem second : True := by sorry'
+        (template / helper).write_text(first + '\n')
+        (template / primary).write_text('import Proofs.Helper\n' + second + '\n')
+        (template / 'Proofs/Challenge.lean').write_text(first + '\n' + second + '\n')
+        solved_first, solved_second = first.replace('sorry', 'trivial'), second.replace('sorry', 'exact first')
+        def batch(last):
+            return (f'*** Begin Patch\n*** Update File: {helper}\n@@\n-{first}\n+{solved_first}\n'
+                    f'*** Update File: {last}\n@@\n-{second}\n+{solved_second}\n*** End Patch')
+
+        lead_turn = child_turn = 0
+        def respond(body):
+            nonlocal lead_turn, child_turn
+            outputs = [item['output'] for item in body['input'] if item['type'] == 'function_call_output']
+            if any(tool['name'] == 'finish' for tool in body['tools']):
+                child_turn += 1
+                if child_turn == 1:
+                    return [call('read_file', {'path': helper}), call('read_file', {'path': primary})]
+                self.assertIn(solved_first, outputs[-2])
+                self.assertIn(solved_second, outputs[-1])
+                return [call('write_file', {'path': helper, 'content': solved_first + ' -- child only\n'}),
+                        call('finish', {'note': 'checked both sources'})]
+            lead_turn += 1
+            if lead_turn == 1:
+                return [call('apply_patch', {'patch': batch('Proofs/Challenge.lean')}),
+                        call('read_file', {'path': helper})]
+            if lead_turn == 2:
+                self.assertIn('outside the declared proof files', outputs[-2])
+                self.assertIn(first, outputs[-1])
+                return [call('apply_patch', {'patch': batch(primary)}),
+                        call('spawn_subagents', {'tasks': [dict(label='check', instructions='inspect files')]})]
+            if lead_turn == 3:
+                self.assertIn('started', json.loads(outputs[-1]))
+                return [call('wait_subagents', {})]
+            handoff, = json.loads(outputs[-1])['completed']
+            self.assertIn('child only', handoff['files'][helper])
+            self.assertIn(solved_second, handoff['files'][primary])
+            return [call('submit', {})]
+        self.server.respond = respond
+        result = self.run_harness('--no-shell')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lead, child = self.records()
+        self.assertEqual(lead['status'], 'verified')
+        self.assertEqual((Path(lead['candidate']) / helper).read_text(), solved_first + '\n')
+        self.assertIn('child only', (Path(child['candidate']) / helper).read_text())
+
     def test_model_failure_keeps_usage_and_candidate(self):
         # The second request fails with a 400. Usage and the candidate must survive.
         turns = 0
