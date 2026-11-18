@@ -33,6 +33,7 @@ class VeriSoftBench(unittest.TestCase):
                          thm_stmt=f"theorem {name} : True", ground_truth_proof=":= by trivial")
                     for i, name in ((1, "one"), (2, "two"))]
             commit = self.repo(repo, {
+                "lean-toolchain": "leanprover/lean4:v4.24.0\n",
                 "lakefile.toml": 'name = "sample"\n[[lean_lib]]\nname = "Lib"\n',
                 **{r["rel_path"]: f'{r["thm_stmt"]} {r["ground_truth_proof"]}\n' for r in rows},
                 "notes.txt": "solution notes",
@@ -47,6 +48,9 @@ class VeriSoftBench(unittest.TestCase):
                 verisoft.prepare(bench, repo, ["1", "2"], out)
             self.assertEqual(json.loads((out / "proof-files.json").read_text()), [r["rel_path"] for r in rows])
             self.assertEqual(json.loads((out / "config.json").read_text())["theorem_names"], ["one", "two"])
+            challenge = (out / "Proofs/Challenge.lean").read_text()
+            self.assertIn("leanprover/lean4:v4.24.0", challenge)
+            self.assertIn((out / "lean-toolchain").read_text().strip(), challenge)
             for r in rows:
                 self.assertEqual((out / r["rel_path"]).read_text(), r["thm_stmt"] + " := by sorry\n")
             self.assertFalse((out / ".git").exists())
