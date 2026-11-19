@@ -31,3 +31,4 @@ pub mod verify;
 #[path = "../../third_party/codex/apply-patch/mod.rs"]
 mod codex_patch;
 pub mod proof_files;
+pub mod workflow;

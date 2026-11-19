@@ -1,0 +1,3 @@
+Sync a working seed first. Look for one redundant intermediate step, repeated rewriting, or an apply/exact chain that a named lemma already closes. Probe a more direct term at the original goal; try exact before simpa, and preserve meaningful case names. A short proof that uses broad search can be slower or less readable. For a performance claim compare like-for-like runs with profile enabled and inspect the returned measurements.
+
+Keep improvements that preserve elaboration and simplify the argument. Revert regressions, retain readable calc chains, and stop when the remaining candidates only save punctuation. Sync the saved edit, check todos, and submit through the normal verifier. If the original is already the clearest proof, submit the checked seed and say so.

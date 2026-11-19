@@ -66,6 +66,31 @@ Build the harness from the repository root:
 cargo build --locked --manifest-path harness/Cargo.toml
 ```
 
+## Lean workflows
+
+Ordinary runs use `autoprove`. Select another workflow with `--workflow` and describe the task with `--prompt`. The controller supplies the selected guide to both Docker and Tapis attempts. Agents can call `read_guide` for other workflows, specialist guidance, or a reference from the installed Beam skill.
+
+| Workflow | What you get |
+| --- | --- |
+| `autoprove` | An autonomous proof search across the declared files, followed by independent verification. |
+| `prove` | A guided cycle with a verified submission or a saved handoff when the next step needs a decision. |
+| `disprove` | A proof of the negation of a configured theorem, or a report on an inconclusive search. Use `--refute Namespace.theorem` when the template names several theorems. |
+| `draft`, `formalize`, `autoformalize` | Elaborated Lean declarations from an informal prompt. Draft leaves intended proof holes, formalize works through one claim, and autoformalize works through the claim queue. Inspect the proposed translation before using it as a trusted challenge. |
+| `review`, `diagnose`, `learn` | A source review, diagnostic report, or lesson with Lean evidence. These workflows inspect the supplied source or seed. |
+| `refactor`, `golf` | A verified improvement to a working proof. Supply the proof with `--seed` if the template contains holes. |
+| `checkpoint` | A verified submission for a finished proof, or a saved partial candidate and a report on open obligations. |
+
+```bash
+scripts/run.sh runs/problem runs/review --workflow review --seed runs/candidate.lean
+scripts/run.sh runs/problem runs/refutation --workflow disprove --refute MyProblem.claim
+scripts/run.sh examples/core runs/draft --workflow draft \
+  --prompt 'Draft a theorem expressing that the sum of two even natural numbers is even.'
+```
+
+A report run prints `REPORT` with the path to `result.json`. Read its `note` and `candidate` fields. Only a successful independent check prints `VERIFIED`. A refutation run saves the generated negated challenge under the pool's `source/` so the exact certificate can be reverified. Guided workflows return questions in reports for the next run. JSONL traces and saved sources retain the handoff.
+
+The workflows and four specialist guides adapt Cameron Freer's MIT-licensed workflow pack at [3f913c6](https://github.com/cameronfreer/lean4-skills/tree/3f913c66251b8712bb58e6ce83a453fa96e3f94f/plugins/lean4). [License](harness/workflows/LICENSE).
+
 ## Setting up a problem
 
 Start from the example template and keep its build files, so the Lean and Mathlib versions match the runtime image.
@@ -119,7 +144,13 @@ echo
 export DEEPSEEK_API_KEY
 ```
 
-Other providers work if they support the `/responses` API. For DeepSeek's own API, use `https://api.deepseek.com` and `deepseek-flash`.
+Other providers work if they support the `/responses` API. For DeepSeek Flash, tool-only turns can omit scored output text. When you want a proof run with this provider, explicitly allow those turns:
+
+```bash
+MODEL=deepseek-flash LOGPROBS=false scripts/run.sh runs/problem runs/mine
+```
+
+The default endpoint is `https://api.deepseek.com`. Runs that require token scores retain the strict default.
 
 Start the run, using the packages extracted from your runtime image.
 Use a new `RUN` directory each time. The harness runs under `nohup`, so closing the terminal won't stop it:

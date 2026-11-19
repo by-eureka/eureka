@@ -215,3 +215,63 @@ fn independently_checks_each_named_theorem_against_the_unedited_project() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires installed Lean 4.35+, Bubblewrap and a systemd user session"]
+fn refutation_checks_the_negation_of_the_original_universal() {
+    let fixture = Fixture::new();
+    let original = fixture.0.join("template");
+    let source = "namespace Sample\ntheorem bound (n : Nat) : n < 4 := by sorry\nend Sample\n";
+    fs::write(original.join("Proofs/Challenge.lean"), source).unwrap();
+    let config = original.join("config.json");
+    let mut cfg: serde_json::Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    cfg["theorem_names"] = serde_json::json!(["Sample.bound", "target"]);
+    fs::write(config, cfg.to_string()).unwrap();
+    use harness::verify::refutation_template;
+    assert!(refutation_template(&original, None).is_err());
+    assert!(refutation_template(&original, Some("absent")).is_err());
+    let prepared = refutation_template(&original, Some("Sample.bound")).unwrap();
+    let project = prepared.path().join("project");
+    let verifier = Arc::new(LeanVerifier::from_template(&project).unwrap());
+    let store = fixture.0.join("store");
+    fs::create_dir(&store).unwrap();
+    let pool = Pool::create(&project, &store, Options::default(), verifier.clone()).unwrap();
+    verifier.prepare(&pool).unwrap();
+    let primary = RelPath::new("Proofs/EurekaRefutationSolution.lean").unwrap();
+    let skeleton = fs::read_to_string(project.join(primary.as_path())).unwrap();
+    let task = pool.task(primary).unwrap();
+    for (candidate, valid) in [
+        (
+            skeleton.replace("  sorry", "  intro h\n  exact absurd (h 4) (by decide)"),
+            true,
+        ),
+        (
+            skeleton.replace(
+                "  sorry",
+                "  exact False.elim (Nat.lt_irrefl 4 (Sample.bound 4))",
+            ),
+            false,
+        ),
+        (
+            "theorem EurekaRefutation.refutation : True := trivial".into(),
+            false,
+        ),
+    ] {
+        let mut attempt = task.attempt("refute").unwrap();
+        attempt.write(candidate.as_bytes()).unwrap();
+        let result = attempt.freeze().unwrap().verify();
+        if valid {
+            result.unwrap();
+        } else {
+            assert!(
+                matches!(result, Err(Error::Rejected(_))),
+                "{:?}",
+                result.err()
+            );
+        }
+    }
+    assert_eq!(
+        fs::read_to_string(original.join("Proofs/Challenge.lean")).unwrap(),
+        source
+    );
+}

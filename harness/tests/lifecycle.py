@@ -111,6 +111,157 @@ class Lifecycle(unittest.TestCase):
     def records(self, store=None):
         return [json.loads(p.read_text()) for p in sorted((store or self.dir).glob('pool-*/attempts/*/result.json'))]
 
+    def test_workflow_guides_and_outcomes(self):
+        path = 'Proofs/Solution.lean'
+        modes = ('draft', 'formalize', 'autoformalize', 'prove', 'autoprove', 'disprove',
+                 'checkpoint', 'review', 'refactor', 'golf', 'learn', 'diagnose')
+        false = self.dir / 'false-claim'
+        shutil.copytree(ROOT/'examples/core', false, ignore=shutil.ignore_patterns('.lake', '.beam'))
+        config = json.loads((false/'config.json').read_text())
+        config['theorem_names'] = ['bound']
+        (false/'config.json').write_text(json.dumps(config))
+        (false/'Proofs/Challenge.lean').write_text('theorem bound (n : Nat) : n < 4 := by sorry\n')
+        for mode in modes:
+            with self.subTest(workflow=mode):
+                inspect = mode in ('review', 'learn', 'diagnose')
+                draft = mode in ('draft', 'formalize', 'autoformalize')
+                reports = inspect or draft
+                store = self.dir/mode
+                store.mkdir()
+                self.args[self.args.index('--store') + 1] = str(store)
+                self.args[self.args.index('--template') + 1] = str(false if mode == 'disprove' else ROOT/'examples/core')
+                turns = 0
+
+                def respond(body):
+                    nonlocal turns
+                    turns += 1
+                    tools = {t['name']: t for t in body['tools']}
+                    names = tools['read_guide']['parameters']['properties']['name']['enum']
+                    self.assertTrue(set(modes) <= set(names))
+                    self.assertIn('troubleshooting.md', names)
+                    self.assertEqual('apply_patch' in tools, not inspect)
+                    self.assertEqual('submit' in tools, not reports)
+                    self.assertEqual('shell' in tools, not reports)
+                    self.assertEqual('spawn_subagents' in tools, not reports)
+                    if turns == 1:
+                        return [call('read_guide', {'name': mode}), call('read_guide', {'name':'troubleshooting.md'}),
+                                call('read_guide', {'name':'../SKILL.md'})]
+                    if turns == 2:
+                        outputs = [i['output'] for i in body['input'] if i.get('type') == 'function_call_output']
+                        self.assertIn(outputs[0], body['instructions'])
+                        self.assertIn('syncBarrierIncomplete', outputs[1])
+                        self.assertIn('ERROR:', outputs[2])
+                        return [call('lean_check', {'text':'example : 2 + 2 = 4 := rfl'})]
+                    if turns == 3:
+                        output = [i['output'] for i in body['input'] if i.get('type') == 'function_call_output'][-1]
+                        self.assertTrue(json.loads(output)[0]['success'], output)
+                        if inspect:
+                            return [message('Lean checked the example; the seed still contains proof holes.')]
+                        if draft:
+                            return [call('write_file', {'path':path, 'content':'theorem drafted : 2 = 2 := true'}),
+                                    call('finish_report', {'note':'invalid draft'})]
+                        if mode == 'disprove':
+                            target = 'Proofs/EurekaRefutationSolution.lean'
+                            return [call('apply_patch', {'patch':'*** Begin Patch\n*** Update File: '+target+'\n@@\n-  sorry\n+  intro h\n+  exact absurd (h 4) (by decide)\n*** End Patch'}), call('submit', {})]
+                        return [call('write_file', {'path':path, 'content':PROOF}), call('submit', {})]
+                    self.assertEqual(turns, 4)
+                    if draft:
+                        output = [i['output'] for i in body['input'] if i.get('type') == 'function_call_output'][-1]
+                        self.assertIn('repair the draft', output)
+                        return [call('write_file', {'path':path, 'content':'theorem drafted : 2 = 2 := rfl'}),
+                                call('finish_report', {'note':'The proposed statement elaborates.'})]
+                    return [call('finish_report', {'note':'Two unfinished obligations in the supplied source.'})]
+                self.server.respond = respond
+                result = self.run_harness('--workflow', mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                record, = self.records(store)
+                self.assertEqual(record['workflow'], mode)
+                self.assertEqual(record['status'], 'reported' if reports else 'verified')
+                self.assertEqual(record['submitted'], not reports)
+                self.assertEqual('VERIFIED ' in result.stdout, not reports)
+                if reports:
+                    artifact = Path(result.stdout.strip().removeprefix('REPORT '))
+                    self.assertEqual(json.loads(artifact.read_text())['note'], record['note'])
+                    self.assertFalse(list(store.glob('pool-*/results/**/winner')))
+                    source = Path(record['candidate']).read_text()
+                    if inspect:
+                        self.assertEqual(source, (ROOT/'examples/core'/path).read_text())
+                    else:
+                        self.assertIn('theorem drafted', source)
+
+    def test_review_detects_source_changes_before_reporting(self):
+        self.args[self.args.index('--template') + 1] = str(ROOT/'examples/core')
+
+        def respond(_):
+            source, = self.dir.glob('pool-*/scratch/*/project/Proofs/Solution.lean')
+            source.write_text(PROOF)
+            return [call('finish_report', {'note':'finished reviewing'})]
+        self.server.respond = respond
+        result = self.run_harness('--workflow', 'review')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        record, = self.records()
+        self.assertEqual(record['status'], 'failed')
+        self.assertIn('source changed during read-only workflow', record['detail'])
+        self.assertIsNone(record['candidate'])
+
+    def test_read_paper_in_consecutive_pages(self):
+        template = self.dir/'template'
+        shutil.copytree(ROOT/'examples/core', template, ignore=shutil.ignore_patterns('.lake', '.beam'))
+        paper = ('幾何∇α⋅' * 14000) + '\r\nEnd.\n'
+        (template/'Paper.txt').write_bytes(paper.encode())
+        self.args[self.args.index('--template') + 1] = str(template)
+        pages = []
+
+        def respond(body):
+            outputs = [i['output'] for i in body['input'] if i.get('type') == 'function_call_output']
+            offset = 0
+            if outputs:
+                marker, page = outputs[-1].split('\n', 1)
+                pages.append(page)
+                if marker == '[end of file]':
+                    self.assertGreater(len(pages), 1)
+                    self.assertEqual(''.join(pages), paper)
+                    return [call('finish_report', {'note': 'Read the complete source.'})]
+                self.assertTrue(marker.startswith('[next start_byte=') and marker.endswith(']'), marker)
+                offset = int(marker[len('[next start_byte='):-1])
+                self.assertEqual(offset, sum(len(s.encode()) for s in pages))
+            return [call('read_file', {'path': 'Paper.txt', 'start_byte': offset})]
+
+        self.server.respond = respond
+        result = self.run_harness('--workflow', 'review')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.records()[0]['status'], 'reported')
+
+    def test_formalization_across_an_import(self):
+        template = self.dir/'template'
+        shutil.copytree(ROOT/'examples/core', template, ignore=shutil.ignore_patterns('.lake', '.beam'))
+        helper, target = 'Proofs/Helper.lean', 'Proofs/Solution.lean'
+        (template/'proof-files.json').write_text(json.dumps([helper, target]))
+        (template/helper).write_text('-- Proposed definitions\n')
+        (template/target).write_text('import Proofs.Helper\n')
+        self.args[self.args.index('--template') + 1] = str(template)
+        phases = iter([
+            [call('write_file', {'path':helper, 'content':'def twice (n : Nat) := n + n'}),
+             call('lean_update', {'path':helper}), call('lean_sync', {'path':helper}),
+             call('lean_save', {'path':helper})],
+            [call('write_file', {'path':target, 'content':'import Proofs.Helper\ntheorem twice_zero : twice 0 = 0 := rfl'}),
+             call('lean_refresh', {'path':target}), call('lean_sync', {'path':target})],
+            [call('finish_report', {'note':'Defined doubling and proved that it preserves zero.'})],
+        ])
+        def respond(body):
+            errors = [i['output'] for i in body['input'] if i.get('type') == 'function_call_output'
+                      and i['output'].startswith('ERROR:')]
+            self.assertFalse(errors, errors)
+            return next(phases)
+        self.server.respond = respond
+        result = self.run_harness('--workflow', 'autoformalize')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record, = self.records()
+        self.assertEqual(record['status'], 'reported')
+        candidate = Path(record['candidate'])
+        self.assertIn('def twice', (candidate/helper).read_text())
+        self.assertIn('theorem twice_zero', (candidate/target).read_text())
+
     def test_missing_packages_stop_before_model_requests(self):
         packages = self.dir / 'empty-packages'
         packages.mkdir()

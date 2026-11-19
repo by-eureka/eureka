@@ -104,6 +104,16 @@ class RunScripts(unittest.TestCase):
         self.assertIn('old IDs are no longer active', metadata['prompt'])
         self.assertEqual(metadata['seed_sha256'], hashlib.sha256(b'saved proof state').hexdigest())
 
+        (pool / 'workflow.json').write_text(json.dumps({'workflow':'review', 'task':'Check the bound on n.'}))
+        reviewed = root/'reviewed'
+        result = subprocess.run([str(scripts/'restart.sh'), str(self.run), str(reviewed)],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((reviewed/'launch.json').read_text())
+        self.assertEqual(args[args.index('--workflow') + 1], 'review')
+        self.assertIn('Check the bound on n.', args[args.index('--prompt') + 1])
+        (pool / 'workflow.json').write_text(json.dumps({'workflow':'disprove', 'task':'Refute the bound.'}))
+
         paths = ['A.lean', 'Lib/B.lean']
         (pool / 'source' / 'proof-files.json').write_text(json.dumps(paths))
         bundle = attempt / 'candidate'

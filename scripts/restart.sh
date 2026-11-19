@@ -81,6 +81,16 @@ prompt = (
     "must give explicit answers, not restate the question. This is a fresh conversation. "
     "The previous agent's handoff may contain unverified claims.\n"
 )
+settings = pools[0] / "workflow.json"
+workflow = "autoprove"
+if settings.is_file():
+    saved = json.loads(settings.read_text())
+    workflow = saved["workflow"]
+    # The pool already contains the negated challenge, ready for proving.
+    if workflow == "disprove":
+        workflow = "prove"
+    prompt = ("Continue the saved candidate using the selected workflow. Check its current Lean state. "
+              "The previous handoff is unverified. Original task follows.\n" + saved["task"][:12000])
 # Keep long reports below Linux's per-argument limit when passed through --prompt.
 prompt += "\nPrevious handoff (last 12000 characters):\n" + handoff[-12000:]
 prompt += "\n\nVerifier feedback (last 12000 characters):\n" + feedback[-12000:]
@@ -105,13 +115,17 @@ if multi:
 else:
     metadata["seed_sha256"] = hashlib.sha256(candidate.read_bytes()).hexdigest()
 for name, value in {"template": str(template), "seed": str(candidate),
-                    "run": str(new), "prompt": prompt}.items():
+                    "run": str(new), "prompt": prompt, "workflow": workflow}.items():
     (scratch / name).write_text(value)
 (scratch / "restart.json").write_text(json.dumps(metadata, indent=2) + "\n")
 PY
 
 # run.sh supplies --dont-give-up and the usual model, runtime and retrieval settings.
 run=$(cat "$scratch/run")
+selection=(--workflow "$(cat "$scratch/workflow")")
+for arg in "$@"; do
+    if [[ $arg == --workflow || $arg == --workflow=* ]]; then selection=(); fi
+done
 "$ROOT/scripts/run.sh" "$(cat "$scratch/template")" "$run" \
-    --seed "$(cat "$scratch/seed")" --prompt "$(cat "$scratch/prompt")" "$@"
+    "${selection[@]}" --seed "$(cat "$scratch/seed")" --prompt "$(cat "$scratch/prompt")" "$@"
 cp "$scratch/restart.json" "$run/restart.json"

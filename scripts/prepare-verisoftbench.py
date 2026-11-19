@@ -64,11 +64,14 @@ def prepare(bench, repo, ids, output):
     # Only the pinned libraries and their notices enter the attempt. No Git
     # history, benchmark JSON, original oleans, examples or model answers.
     files = {}
+    upstream_toolchain = None
     with subprocess.Popen(["git", "-C", str(repo), "archive", "--format=tar", commit],
                           stdout=subprocess.PIPE) as process:
         with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
             for member in archive:
                 name = member.name
+                if name == "lean-toolchain" and member.isfile():
+                    upstream_toolchain = archive.extractfile(member).read().decode().strip()
                 in_library = any(name == lib + ".lean" or name.startswith(lib + "/") for lib in libs)
                 notice = "/" not in name and name.upper().startswith(("LICENSE", "COPYRIGHT", "NOTICE"))
                 if member.isfile() and ((in_library and name.endswith(".lean")) or notice):
@@ -86,6 +89,13 @@ def prepare(bench, repo, ids, output):
     paths = list(dict.fromkeys(t["rel_path"] for t in tasks))
     imports = "".join("import " + p[:-5].replace("/", ".") + "\n" for p in paths)
     files["Proofs/Challenge.lean"] = imports
+    active_toolchain = (base / "lean-toolchain").read_text().strip()
+    if upstream_toolchain and upstream_toolchain != active_toolchain:
+        selector = " ".join(upstream_toolchain.splitlines())
+        files["Proofs/Challenge.lean"] = (
+            f"-- VeriSoftBench replays these proofs on {selector}. This workspace uses {active_toolchain}.\n"
+            "-- Fill only the selected holes. Preserve surrounding proofs and their original lemma names, including deprecated aliases.\n" + imports
+        )
     files["Proofs/Solution.lean"] = imports
     files["Proofs.lean"] = "import Proofs.Solution\n"
     files["proof-files.json"] = json.dumps(paths, indent=2) + "\n"

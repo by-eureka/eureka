@@ -9,13 +9,12 @@
 //! bodies. Compaction summaries are captured with their own artifacts.
 
 use crate::responses::{Client, Completion, ContextLengthExceeded, Item, Usage, parse_arguments};
-use crate::tools::{Ctx, Tool, definition};
+use crate::tools::{Ctx, Ending, Tool, definition};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 #[derive(Clone, Debug)]
@@ -85,12 +84,13 @@ async fn run_loop(
     outcome: &mut Outcome,
 ) -> Result<()> {
     let specs: Vec<Value> = tools.iter().map(|t| definition(&t.spec())).collect();
+    let accepts_report = specs.iter().any(|tool| tool["name"] == "finish_report");
     let mut items = vec![Item::user(prompt)];
     let mut requests = 0;
     let mut compactions = 0;
     let mut compacted_since_response = false;
 
-    while outcome.turns < config.max_turns {
+    'turns: while outcome.turns < config.max_turns {
         if ctx.stop.is_cancelled() {
             outcome.termination = "cancelled".into();
             break;
@@ -204,11 +204,14 @@ async fn run_loop(
                 )));
                 continue;
             }
+            if accepts_report {
+                items.push(Item::user("Record your written findings with finish_report(note), or submit a complete proof if your workflow offers submit. Include the result itself in the note."));
+                continue;
+            }
             if config.dont_give_up {
                 items.push(Item::user(
-                    "Continue the assigned proof work with tools. A narrative reply does not finish \
-                     the task. Use submit when the whole proof is ready, or finish to return your \
-                     assigned helper work. Do not give up or claim success without verification.",
+                    "Continue the assigned workflow. Use the available completion tool for your role \
+                     when its requested proof, report or handoff is ready.",
                 ));
                 continue;
             }
@@ -226,15 +229,16 @@ async fn run_loop(
                 output = invoke(tools, call_id, name, arguments, ctx) => output,
             };
             items.push(Item::output(call_id, output));
-            if ctx.submitted.load(Ordering::SeqCst) {
-                // Skip anything the model queued after submit/finish.
-                break;
+            if let Some(ending) = ctx.ending.lock().unwrap().as_ref() {
+                outcome.submitted = !matches!(ending, Ending::Report(_));
+                outcome.termination = if outcome.submitted {
+                    "submitted"
+                } else {
+                    "reported"
+                }
+                .into();
+                break 'turns;
             }
-        }
-        if ctx.submitted.load(Ordering::SeqCst) {
-            outcome.submitted = true;
-            outcome.termination = "submitted".into();
-            break;
         }
     }
     Ok(())

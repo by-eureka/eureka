@@ -12,7 +12,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use worktrees::RelPath;
@@ -30,6 +29,23 @@ pub enum Role {
     Subagent,
 }
 
+/// Terminal actions carry the note and outcome together so a report can
+/// never be mistaken for a verification request.
+pub enum Ending {
+    Submit(Option<String>),
+    Handoff(String),
+    Report(String),
+}
+
+impl Ending {
+    pub fn note(self) -> Option<String> {
+        match self {
+            Self::Submit(note) => note,
+            Self::Handoff(note) | Self::Report(note) => Some(note),
+        }
+    }
+}
+
 /// Per-attempt context shared by all tools.
 /// `root` is the controller-side attempt. File tools use the active sandbox workspace.
 pub struct Ctx {
@@ -41,9 +57,7 @@ pub struct Ctx {
     pub beam: Arc<Beam>,
     pub sandbox: Arc<Sandbox>,
     pub trace: Arc<Trace>,
-    /// Set by `submit` or `finish`; the loop ends after the current call.
-    pub submitted: AtomicBool,
-    pub note: Mutex<Option<String>>,
+    pub ending: Mutex<Option<Ending>>,
     pub artifacts: PathBuf,
     pub stop: tokio_util::sync::CancellationToken,
 }
@@ -139,14 +153,52 @@ fn normalize_probe(name: &str, mut args: Value, ctx: &Ctx) -> Value {
 
 // --- Files ------------------------------------------------------------------
 
+pub struct ReadGuide(pub Arc<crate::workflow::Guides>);
+
+impl Tool for ReadGuide {
+    fn spec(&self) -> ToolSpec {
+        spec(
+            "read_guide",
+            "Read a Lean workflow or a reference from this run's Beam skill.",
+            json!({"type":"object","properties":{"name":{"type":"string","enum":self.0.names().collect::<Vec<_>>()}},"required":["name"],"additionalProperties":false}),
+            true,
+        )
+    }
+    fn call<'a>(&'a self, args: Value, _ctx: &'a Ctx) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move { Ok(self.0.read(str_arg(&args, "name")?)?.to_owned()) })
+    }
+}
+
 pub struct ReadFile;
+
+fn file_page(text: &str, offset: &Value) -> Result<String> {
+    let start = offset
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok())
+        .context("start_byte must be a nonnegative integer")?;
+    anyhow::ensure!(
+        text.is_char_boundary(start),
+        "start_byte must be a UTF-8 boundary within the file"
+    );
+    // Leave room for the continuation marker, including when a line spans multiple pages.
+    let end = text.floor_char_boundary(start.saturating_add(MAX_OUTPUT - 128).min(text.len()));
+    let page = &text[start..end];
+    if end == text.len() {
+        Ok(format!("[end of file]\n{page}"))
+    } else {
+        Ok(format!("[next start_byte={end}]\n{page}"))
+    }
+}
 
 impl Tool for ReadFile {
     fn spec(&self) -> ToolSpec {
         spec(
             "read_file",
-            "Read a file in the project. Lines are numbered from 0 to match Lean/LSP positions.",
-            json!({"type": "object", "properties": {"path": {"type": "string", "description": "Path relative to the project root."}}, "required": ["path"], "additionalProperties": false}),
+            "Read a project file with 0-based line numbers. For a long source, set start_byte to 0, then follow each next start_byte to read consecutive pages of raw text.",
+            json!({"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path relative to the project root."},
+                "start_byte": {"type": "integer", "minimum": 0, "description": "Byte offset for a plain-text page, starting at 0."}
+            }, "required": ["path"], "additionalProperties": false}),
             true,
         )
     }
@@ -155,6 +207,9 @@ impl Tool for ReadFile {
             let rel = RelPath::new(str_arg(&args, "path")?)?;
             // read_beneath won't follow symlinks out of the root.
             let text = String::from_utf8(ctx.sandbox.read_file(&ctx.root, &rel, MAX_READ).await?)?;
+            if let Some(offset) = args.get("start_byte") {
+                return file_page(&text, offset);
+            }
             Ok(truncate(
                 text.lines()
                     .enumerate()
@@ -408,8 +463,9 @@ impl Tool for Submit {
     }
     fn call<'a>(&'a self, args: Value, ctx: &'a Ctx) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            *ctx.note.lock().unwrap() = args.get("note").and_then(Value::as_str).map(str::to_owned);
-            ctx.submitted.store(true, Ordering::SeqCst);
+            *ctx.ending.lock().unwrap() = Some(Ending::Submit(
+                args.get("note").and_then(Value::as_str).map(str::to_owned),
+            ));
             ctx.trace
                 .event(&ctx.id, "submit", json!({"note": args.get("note")}));
             Ok("submitted".into())
@@ -434,11 +490,46 @@ impl Tool for Finish {
     }
     fn call<'a>(&'a self, args: Value, ctx: &'a Ctx) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            *ctx.note.lock().unwrap() = Some(str_arg(&args, "note")?.to_owned());
-            ctx.submitted.store(true, Ordering::SeqCst);
+            *ctx.ending.lock().unwrap() = Some(Ending::Handoff(str_arg(&args, "note")?.to_owned()));
             ctx.trace
                 .event(&ctx.id, "finish", json!({"note": args.get("note")}));
             Ok("finished".into())
+        })
+    }
+}
+
+/// A report ends the lead's workflow without submitting a proof.
+pub struct FinishReport(pub crate::workflow::Workflow);
+impl Tool for FinishReport {
+    fn spec(&self) -> ToolSpec {
+        spec(
+            "finish_report",
+            "Finish with a written report and the saved candidate. Include the finding, checked evidence and any remaining obligation or decision.",
+            json!({"type":"object","properties":{"note":{"type":"string","minLength":1}},"required":["note"],"additionalProperties":false}),
+            false,
+        )
+    }
+    fn call<'a>(&'a self, args: Value, ctx: &'a Ctx) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let note = str_arg(&args, "note")?;
+            anyhow::ensure!(!note.trim().is_empty(), "the report must contain a finding");
+            if self.0.drafts_source() {
+                for file in &ctx.proof_files {
+                    let sync = ctx
+                        .beam
+                        .call("lean_sync", &json!({"path":file.as_str()}))
+                        .await?;
+                    let state: Value = serde_json::from_str(&sync)?;
+                    anyhow::ensure!(
+                        state.pointer("/readiness/save_ready") == Some(&json!(true)),
+                        "repair the draft in {file} before reporting: {sync}"
+                    );
+                }
+            }
+            *ctx.ending.lock().unwrap() = Some(Ending::Report(note.to_owned()));
+            ctx.trace
+                .event(&ctx.id, "finish_report", json!({"note":note}));
+            Ok("reported".into())
         })
     }
 }

@@ -1,0 +1,3 @@
+Turn one informal claim into a Lean statement and work through the first checked proof cycle. Identify the types, quantifier order and mathematical conventions in the source. Resolve library vocabulary with lean_workspace_symbols and lean_check. Where two readings differ mathematically, demonstrate the distinction with a small example and ask the author to choose in the report.
+
+Write the proposed declaration in a declared file and sync it. Inspect its goal and probe a proof, then commit what Lean accepted. Redraft only newly proposed headers and only when that improves fidelity to the source; record the reason. Keep any unresolved proof holes and interpretation decisions explicit. Finish with the saved source, Lean evidence and the next question in finish_report.
