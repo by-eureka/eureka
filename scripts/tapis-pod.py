@@ -2,12 +2,18 @@
 """TACC Pods lifecycle for the Eureka controller. The model never sees these credentials."""
 import argparse
 import base64
+from contextlib import contextmanager
+import fcntl
+import http.client
 import json
 import os
 from pathlib import Path
+import random
 import re
 import secrets
 import subprocess
+import ssl
+import sys
 import tempfile
 import time
 import urllib.error
@@ -21,7 +27,46 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def api(method, path, payload=None):
+class TransientError(RuntimeError):
+    pass
+
+
+class ConflictError(RuntimeError):
+    pass
+
+
+def seconds_left(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Tapis lifecycle deadline exceeded")
+    return remaining
+
+
+def backoff(deadline, delay):
+    time.sleep(min(seconds_left(deadline), random.uniform(delay * 0.8, delay * 1.2)))
+
+
+@contextmanager
+def startup_slot():
+    # All harness processes on the controller share these locks. A process exit releases its slot.
+    limit = int(os.getenv("TAPIS_MAX_STARTING", "3"))
+    if limit < 1:
+        raise ValueError("TAPIS_MAX_STARTING must be positive")
+    cache = Path(os.getenv("XDG_CACHE_HOME") or Path.home() / ".cache") / "eureka" / "tapis-starts"
+    cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+    while True:
+        for index in range(limit):
+            with (cache / str(index)).open("a") as slot:
+                try:
+                    fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                yield
+                return
+        time.sleep(random.uniform(1, 3))
+
+
+def request(method, path, payload, timeout):
     token_file = os.getenv("TAPIS_TOKEN_FILE")
     if not token_file:
         raise ValueError("set TAPIS_TOKEN_FILE to a private TACC access token file")
@@ -32,20 +77,65 @@ def api(method, path, payload=None):
         data=None if payload is None else json.dumps(payload).encode(),
         headers={"X-Tapis-Token": token, "Content-Type": "application/json"})
     try:
-        with urllib.request.build_opener(NoRedirect()).open(req, timeout=45) as response:
+        with urllib.request.build_opener(NoRedirect()).open(req, timeout=timeout) as response:
             result = json.load(response)
     except urllib.error.HTTPError as error:
-        if error.code == 404 and method == "GET":
+        if error.code == 404 and method in {"GET", "DELETE"}:
             return None
         try:
             detail = str(json.load(error).get("message", "")).replace(token, "[redacted]")
             detail = re.sub(r"eyJ[\w.-]{20,}", "[redacted]", detail)[:450]
         except (ValueError, AttributeError):
             detail = ""
-        raise RuntimeError(f"Tapis {method} {path}: HTTP {error.code}: {detail}") from None
+        message = f"Tapis {method} {path}: HTTP {error.code}: {detail}"
+        if error.code in {408, 429, 500, 502, 503, 504}:
+            raise TransientError(message) from None
+        if error.code == 409:
+            raise ConflictError(message) from None
+        raise RuntimeError(message) from None
+    except (urllib.error.URLError, ConnectionError, TimeoutError, http.client.IncompleteRead, json.JSONDecodeError) as error:
+        if isinstance(getattr(error, "reason", None), ssl.SSLCertVerificationError):
+            raise RuntimeError("Tapis TLS certificate verification failed") from None
+        raise TransientError(f"Tapis {method} {path}: {type(error).__name__}") from None
     if result.get("status") != "success":
         raise RuntimeError(f"Tapis {method} {path} failed")
     return result["result"]
+
+
+HOST_KEY = {"commands": [["cat", "/run/eureka/host.pub"]], "fail_on_non_success": False}
+
+
+def api(method, path, payload=None, *, deadline):
+    delay = 2
+    while True:
+        try:
+            return request(method, path, payload, min(90, seconds_left(deadline)))
+        except TransientError:
+            if method != "GET" and not (path.endswith("/exec") and payload == HOST_KEY):
+                raise
+            backoff(deadline, delay)
+            delay = min(20, delay * 2)
+
+
+def owned(row, description):
+    if row is not None and row.get("description") != description:
+        raise RuntimeError("Tapis pod belongs to another attempt")
+    return row
+
+
+def submit(template, deadline):
+    path = "/" + template["pod_id"]
+    while True:
+        try:
+            api("POST", "", template, deadline=deadline)
+            return
+        except (ConflictError, TransientError):
+            # The server can commit a create even when the caller receives a gateway error.
+            # Every retry uses the original ID, public key and ownership marker.
+            for delay in (2, 5, 12):
+                backoff(deadline, delay)
+                if owned(api("GET", path, deadline=deadline), template["description"]) is not None:
+                    return
 
 
 def ssh(state, args):
@@ -62,17 +152,33 @@ def ssh(state, args):
 
 
 def delete(state):
-    meta = json.loads((state / "pod.json").read_text())
-    path = "/" + meta["id"]
-    row = api("GET", path)
-    if row is not None:
-        if row.get("description") != meta["description"]:
-            raise RuntimeError("refusing to delete pod owned by another attempt")
-        api("DELETE", path)
-    if api("GET", path) is not None:
-        raise RuntimeError("Tapis still reports the pod after deletion")
-    (state / "identity").unlink(missing_ok=True)
-    (state / "deleted").touch()
+    with (state / "cleanup.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if (state / "deleted").exists():
+            return
+        meta = json.loads((state / "pod.json").read_text())
+        path = "/" + meta["id"]
+        deadline = time.monotonic() + 360
+        next_delete = 0
+        while True:
+            row = owned(api("GET", path, deadline=deadline), meta["description"])
+            if row is None:
+                # An interrupted create can appear after the first successful lookup.
+                if (state / "create-pending").exists():
+                    backoff(deadline, 15)
+                    if owned(api("GET", path, deadline=deadline), meta["description"]) is not None:
+                        continue
+                break
+            if time.monotonic() >= next_delete:
+                try:
+                    api("DELETE", path, deadline=deadline)
+                except (TransientError, ConflictError):
+                    pass  # Look up this same owned pod before retrying a mutation.
+                next_delete = time.monotonic() + 30
+                continue
+            backoff(deadline, 4)
+        (state / "identity").unlink(missing_ok=True)
+        (state / "deleted").touch()
 
 
 def create(state, root, image, memory, cpus):
@@ -99,10 +205,14 @@ def create(state, root, image, memory, cpus):
     started = time.monotonic()
     last_status = None
     try:
-        api("POST", "", template)
-        deadline = time.monotonic() + int(os.getenv("TAPIS_START_TIMEOUT", "900"))
+        deadline = started + int(os.getenv("TAPIS_START_TIMEOUT", "900"))
+        pending = state / "create-pending"
+        pending.touch()
+        submit(template, deadline)
+        pending.unlink()
+        next_attestation = 0
         while time.monotonic() < deadline:
-            row = api("GET", path)
+            row = owned(api("GET", path, deadline=deadline), description)
             status = (row or {}).get("status")
             container = (row or {}).get("status_container", {})
             progress = (status, container.get("phase"), container.get("message"))
@@ -111,25 +221,27 @@ def create(state, root, image, memory, cpus):
                     log.write(json.dumps(dict(seconds=round(time.monotonic() - started, 2),
                                               status=status, phase=progress[1], message=progress[2])) + "\n")
                 last_status = progress
-            if row is None or status in {"STOPPED", "COMPLETE", "ERROR"}:
+            if status in {"STOPPED", "COMPLETE", "ERROR"}:
                 raise RuntimeError(f"{ident} stopped during startup ({status}); see {state}/startup.jsonl")
             if status == "AVAILABLE":
                 # Bootstrap the host key through the authenticated Tapis control plane.
-                result = api("POST", path + "/exec", {"commands": [["cat", "/run/eureka/host.pub"]],
-                                                      "fail_on_non_success": False})
-                output = result.get("execution_results", []) if isinstance(result, dict) else result
-                if output and isinstance(output[0], dict):
-                    public = output[0].get("stdout", "").strip().split()
-                    if len(public) >= 2 and public[0] == "ssh-ed25519" and re.fullmatch(r"[A-Za-z0-9+/]+=*", public[1]):
-                        (state / "known_hosts").write_text(f"{ident}.pods.tacc.tapis.io {public[0]} {public[1]}\n")
-                        try:
-                            test = subprocess.run(ssh(state, ["exec", "/opt/lean/bin/lean", "--githash"]),
-                                                  capture_output=True, timeout=25)
-                        except subprocess.TimeoutExpired:
-                            test = None
-                        if test is not None and test.returncode == 0:
-                            break
-            time.sleep(3)
+                if time.monotonic() >= next_attestation:
+                    result = api("POST", path + "/exec", HOST_KEY, deadline=deadline)
+                    output = result.get("execution_results", []) if isinstance(result, dict) else result
+                    if output and isinstance(output[0], dict):
+                        public = output[0].get("stdout", "").strip().split()
+                        if len(public) >= 2 and public[0] == "ssh-ed25519" and re.fullmatch(r"[A-Za-z0-9+/]+=*", public[1]):
+                            (state / "known_hosts").write_text(f"{ident}.pods.tacc.tapis.io {public[0]} {public[1]}\n")
+                            next_attestation = time.monotonic() + 60
+                if (state / "known_hosts").is_file():
+                    try:
+                        test = subprocess.run(ssh(state, ["exec", "/opt/lean/bin/lean", "--githash"]),
+                                              capture_output=True, timeout=min(25, seconds_left(deadline)))
+                    except subprocess.TimeoutExpired:
+                        test = None
+                    if test is not None and test.returncode == 0:
+                        break
+            backoff(deadline, 7)
         else:
             raise RuntimeError(f"{ident} exceeded startup deadline; see {state}/startup.jsonl")
         expected = subprocess.check_output(["elan", "run", (root/"lean-toolchain").read_text().strip(), "lean", "--githash"]).strip()
@@ -156,7 +268,10 @@ def create(state, root, image, memory, cpus):
         }, indent=2) + "\n")
         print(ident, flush=True)
     except BaseException:
-        delete(state)
+        try:
+            delete(state)
+        except Exception as cleanup:
+            print(f"Tapis cleanup pending for {state}: {cleanup}", file=sys.stderr)
         raise
 
 
@@ -169,7 +284,8 @@ def main():
     state = a.state.resolve()
     if a.action == "create":
         root, image, memory, cpus = a.arguments
-        create(state, Path(root), image, int(memory), int(cpus))
+        with startup_slot():
+            create(state, Path(root), image, int(memory), int(cpus))
     elif a.action == "delete":
         delete(state)
     else:

@@ -368,22 +368,31 @@ impl Harness {
             if let Some(sandbox) = sandbox
                 && let Err(error) = sandbox.close().await
             {
-                // Never remove a bind mount while a writer may still be alive.
-                // Retain the workspace for explicit recovery if Docker is unavailable.
-                std::mem::forget(attempt);
-                artifact(
-                    &artifacts.join("result.json"),
-                    &serde_json::to_vec_pretty(
-                        &json!({"status": "cleanup_failed", "root": root, "error": format!("{error:#}")}),
-                    )?,
-                )?;
-                bail!(
-                    "{id}: cannot stop sandbox; retained {}: {error:#}",
-                    root.display()
-                );
+                if self.sandbox.tapis.is_some() {
+                    // A pod cannot write the private host copy. Verify the collected files and
+                    // let the run's final prune retry deletion, even if verification fails.
+                    self.trace.event(
+                        &id,
+                        "pod_cleanup_deferred",
+                        json!({"error": format!("{error:#}")}),
+                    );
+                } else {
+                    // A live Docker writer may still hold the host bind mount.
+                    std::mem::forget(attempt);
+                    artifact(
+                        &artifacts.join("result.json"),
+                        &serde_json::to_vec_pretty(
+                            &json!({"status": "cleanup_failed", "root": root, "error": format!("{error:#}")}),
+                        )?,
+                    )?;
+                    bail!(
+                        "{id}: cannot stop sandbox; retained {}: {error:#}",
+                        root.display()
+                    );
+                }
             }
             self.usage.lock().unwrap().add(&outcome.usage);
-            // Freeze the declared proof files after all sandbox writers stop.
+            // Freeze the declared files once the captured host copy has no sandbox writers.
             let frozen = tokio::task::spawn_blocking(move || {
                 capture?;
                 let frozen = attempt.freeze().context("freeze target")?;
