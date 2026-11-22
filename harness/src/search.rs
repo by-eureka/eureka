@@ -30,6 +30,11 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use worktrees::{Error, Frozen, PublishOutcome, Published, Task, Verified};
 
+fn source_lines(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|&&byte| byte == b'\n').count()
+        + usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"))
+}
+
 /// Everything the attempts of one run share. Per-attempt state is in tools::Ctx.
 pub struct Harness {
     pub task: Task,
@@ -39,6 +44,7 @@ pub struct Harness {
     pub agent: AgentConfig,
     pub instructions: String,
     pub workflow: Workflow,
+    pub verify_shorter_at_limit: bool,
     pub guides: Arc<Guides>,
     pub shell: bool,
     pub shell_timeout: Duration,
@@ -228,6 +234,15 @@ impl Harness {
                     ));
                 }
             }
+            let starting_lines = if self.verify_shorter_at_limit && role == Role::Lead {
+                let mut total = 0;
+                for path in self.task.targets() {
+                    total += source_lines(&worktrees::read_beneath(&root, path, MAX_FILE)?);
+                }
+                Some(total)
+            } else {
+                None
+            };
             let children = Arc::new(tokio::sync::Mutex::new(Children {
                 running: JoinSet::new(),
                 stop: stop.child_token(),
@@ -433,13 +448,24 @@ impl Harness {
                     None
                 }
             };
+            let shorter_at_limit = result.termination == "turn_limit"
+                && outcome.error.is_none()
+                && !stop.is_cancelled()
+                && frozen
+                    .as_ref()
+                    .zip(starting_lines)
+                    .is_some_and(|(candidate, initial)| {
+                        candidate
+                            .files()
+                            .values()
+                            .map(|bytes| source_lines(bytes))
+                            .sum::<usize>()
+                            < initial
+                    });
+            let verify_lead = (result.submitted && role == Role::Lead) || shorter_at_limit;
             // Persist progress before any verifier process can fail.
             let mut pending = result.report();
-            pending["status"] = json!(if outcome.submitted && role == Role::Lead {
-                "verifying"
-            } else {
-                "captured"
-            });
+            pending["status"] = json!(if verify_lead { "verifying" } else { "captured" });
             artifact(
                 &result.artifacts.join("result.json"),
                 &serde_json::to_vec_pretty(&pending)?,
@@ -449,11 +475,11 @@ impl Harness {
                 // about the proof, so it's Failed rather than Rejected.
                 (Some(error), _) => Verdict::Failed(error),
                 (None, Some(_)) if result.termination == "reported" => Verdict::Reported,
-                (None, Some(frozen)) if result.submitted && role == Role::Lead => {
+                (None, Some(frozen)) if verify_lead => {
                     self.trace.event(
                         &id,
                         "verification_start",
-                        json!({"candidate": result.candidate}),
+                        json!({"candidate": result.candidate, "trigger": if shorter_at_limit { "shorter_at_turn_limit" } else { "submit" }}),
                     );
                     match verify_candidate(frozen, &result.artifacts).await {
                         Ok(v) => Verdict::Verified(v),
