@@ -35,8 +35,10 @@ class ConflictError(RuntimeError):
     pass
 
 
-class MissingIngressRoute(RuntimeError):
-    pass
+class IngressCertificateUnavailable(RuntimeError):
+    def __init__(self, ident, replacement):
+        super().__init__(f"{ident}: public ingress still presents the default certificate")
+        self.replacement = replacement
 
 
 def seconds_left(deadline):
@@ -48,6 +50,24 @@ def seconds_left(deadline):
 
 def backoff(deadline, delay):
     time.sleep(min(seconds_left(deadline), random.uniform(delay * 0.8, delay * 1.2)))
+
+
+def certified_names():
+    cache = Path(os.getenv("XDG_CACHE_HOME") or Path.home() / ".cache") / "eureka" / "tapis-certificates"
+    cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return cache
+
+
+def claim_certified_name():
+    # Unlink is atomic across controllers sharing this cache. A crash can only lose a name.
+    for name in certified_names().iterdir():
+        if re.fullmatch(r"eur[0-9a-f]{16}", name.name):
+            try:
+                name.unlink()
+            except FileNotFoundError:
+                continue
+            return name.name
+    return None
 
 
 @contextmanager
@@ -186,31 +206,37 @@ def delete(state):
             backoff(deadline, 4)
         (state / "identity").unlink(missing_ok=True)
         (state / "deleted").touch()
+        if (state / "runtime.json").is_file() and re.fullmatch(r"eur[0-9a-f]{16}", meta["id"]):
+            # A new attempt can reuse the public certificate for a deleted pod. It gets new keys.
+            try:
+                (certified_names() / meta["id"]).touch()
+            except OSError as error:
+                print(f"Could not cache the deleted pod name: {error}", file=sys.stderr)
 
 
 def create(state, root, image, memory, cpus):
     deadline = time.monotonic() + int(os.getenv("TAPIS_START_TIMEOUT", "900"))
+    ident = claim_certified_name() or "eur" + secrets.token_hex(8)
     try:
-        create_once(state, root, image, memory, cpus, deadline)
-    except MissingIngressRoute:
-        # A new route needs a new pod ID. Retain the first receipt and never overlap pods.
+        create_once(state, root, image, memory, cpus, deadline, ident, allow_replacement=True)
+    except IngressCertificateUnavailable as error:
+        # Try a previously certified name only after the first pod is gone.
         if not (state / "deleted").is_file() or time.monotonic() >= deadline:
             raise
         state.rename(state.with_name(state.name + "-unrouted"))
-        create_once(state, root, image, memory, cpus, deadline)
+        create_once(state, root, image, memory, cpus, deadline, error.replacement, allow_replacement=False)
 
 
-def missing_ingress(test):
+def default_ingress_certificate(test):
     return (test is not None and test.returncode == 255
             and b"TRAEFIK DEFAULT CERT" in test.stderr
             and b"self-signed certificate" in test.stderr)
 
 
-def create_once(state, root, image, memory, cpus, deadline):
+def create_once(state, root, image, memory, cpus, deadline, ident, *, allow_replacement):
     if not re.fullmatch(r"debganguly/infinilean:[A-Za-z0-9_.-]+", image) or image.endswith(":latest"):
         raise ValueError("expected a versioned debganguly/infinilean image tag")
     state.mkdir(mode=0o700)
-    ident = "eur" + secrets.token_hex(8)
     description = "Eureka attempt " + secrets.token_hex(16)
     (state / "pod.json").write_text(json.dumps({"id": ident, "description": description, "image": image}) + "\n")
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-C", "", "-N", "", "-f", str(state/"identity")], check=True)
@@ -269,12 +295,14 @@ def create_once(state, root, image, memory, cpus, deadline):
                         test = None
                     if test is not None and test.returncode == 0:
                         break
-                    if missing_ingress(test):
+                    if default_ingress_certificate(test):
                         now = time.monotonic()
                         if missing_since is None:
                             missing_since = now
-                        elif now - missing_since >= 90:
-                            raise MissingIngressRoute(f"{ident}: public ingress still presents the default certificate")
+                        elif allow_replacement and now - missing_since >= 90:
+                            replacement = claim_certified_name()
+                            if replacement:
+                                raise IngressCertificateUnavailable(ident, replacement)
                     else:
                         missing_since = None
             backoff(deadline, 7)

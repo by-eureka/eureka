@@ -2,6 +2,7 @@ import importlib.util
 import json
 import subprocess
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
 import unittest
@@ -69,25 +70,84 @@ class PodStartupTests(unittest.TestCase):
         for deleted, calls in ((True, 2), (False, 1)):
             with self.subTest(deleted=deleted), TemporaryDirectory() as tmp:
                 state = Path(tmp) / "tapis"
-                def unrouted(state, *_args):
+                def unrouted(state, *_args, **_kwargs):
                     state.mkdir()
                     if deleted:
                         (state / "deleted").touch()
-                    raise pods.MissingIngressRoute("default certificate")
-                with patch.object(pods, "create_once", side_effect=unrouted) as provision:
-                    with self.assertRaises(pods.MissingIngressRoute):
+                    raise pods.IngressCertificateUnavailable("first", "replacement")
+                with patch.object(pods, "claim_certified_name", side_effect=["first", "replacement"]), patch.object(pods, "create_once", side_effect=unrouted) as provision:
+                    with self.assertRaises(pods.IngressCertificateUnavailable):
                         pods.create(state, Path(tmp), "image", 8192, 1000)
                 self.assertEqual(provision.call_count, calls)
                 self.assertEqual((Path(tmp) / "tapis-unrouted/deleted").exists(), deleted)
                 if deleted:
-                    self.assertEqual(provision.call_args_list[0], provision.call_args_list[1])
+                    first, second = (c.args for c in provision.call_args_list)
+                    self.assertEqual(first[:-1], second[:-1])
+                    self.assertEqual((first[-1], second[-1]), ("first", "replacement"))
+                    self.assertEqual([c.kwargs["allow_replacement"] for c in provision.call_args_list], [True, False])
+
+    def test_only_confirmed_deleted_ready_names_can_be_reused_once(self):
+        ident = "eur0123456789abcdef"
+        with TemporaryDirectory() as tmp, patch.dict(pods.os.environ, {"XDG_CACHE_HOME": tmp}):
+            state = Path(tmp) / "state"
+            state.mkdir()
+            (state / "pod.json").write_text(json.dumps({"id": ident, "description": "owned"}))
+            (state / "runtime.json").touch()
+            with patch.object(pods, "api", side_effect=[{"description": "owned"}, {}, None]):
+                pods.delete(state)
+            self.assertEqual(pods.claim_certified_name(), ident)
+            pods.delete(state)
+            self.assertIsNone(pods.claim_certified_name())
+
+    def test_concurrent_attempts_claim_each_name_once(self):
+        with TemporaryDirectory() as tmp, patch.dict(pods.os.environ, {"XDG_CACHE_HOME": tmp}):
+            names = {f"eur{n:016x}" for n in range(3)}
+            for name in names:
+                (pods.certified_names() / name).touch()
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                claimed = list(pool.map(lambda _: pods.claim_certified_name(), range(8)))
+            self.assertCountEqual(claimed, [*names, None, None, None, None, None])
+
+    def test_default_certificate_can_recover_in_place_with_no_cached_name(self):
+        # The provider may finish issuance after 90 seconds. Keep the original pod in that case.
+        with TemporaryDirectory() as tmp:
+            state = Path(tmp) / "tapis"
+            available = {"status": "AVAILABLE"}
+            result = [{"stdout": "ssh-ed25519 YQ=="}]
+            def api(verb, path, *args, **kwargs):
+                if verb == "POST":
+                    return result
+                available["description"] = json.loads((state / "pod.json").read_text())["description"]
+                return available
+            default = subprocess.CompletedProcess([], 255, stderr=b"TRAEFIK DEFAULT CERT self-signed certificate")
+            ok = subprocess.CompletedProcess([], 0, stdout=b"recovered")
+            def run(cmd, **kwargs):
+                if cmd[0] == "ssh-keygen":
+                    (state / "identity.pub").write_text("ssh-ed25519 YQ==")
+                    return
+                return next(probes)
+            probes = iter((default, default, ok))
+            now = [0]
+            def advance(*args):
+                now[0] += 100
+            (Path(tmp) / "lean-toolchain").write_text("test")
+            with patch.object(pods, "api", side_effect=api), patch.object(pods, "submit"), \
+                 patch.object(pods.time, "monotonic", side_effect=lambda: now[0]), \
+                 patch.object(pods, "backoff", side_effect=advance), patch.object(pods, "delete"), \
+                 patch.object(pods, "claim_certified_name", return_value=None) as claim, \
+                 patch.object(pods.subprocess, "run", side_effect=run), \
+                 patch.object(pods.subprocess, "check_output", return_value=b"0" * 40):
+                with self.assertRaisesRegex(RuntimeError, "compiler revisions differ"):
+                    pods.create_once(state, Path(tmp), "debganguly/infinilean:test", 8192, 1000, 900,
+                                     "eur0123456789abcdef", allow_replacement=True)
+                claim.assert_called_once_with()
 
     def test_identifies_only_an_unrouted_tls_handshake(self):
         errors = b"depth=0 CN = TRAEFIK DEFAULT CERT\nverify error:num=18:self-signed certificate"
         for rc, stderr, missing in ((255, errors, True), (0, errors, False),
                                     (255, b"Permission denied", False), (255, b"self-signed certificate", False)):
-            self.assertEqual(pods.missing_ingress(subprocess.CompletedProcess([], rc, stderr=stderr)), missing)
-        self.assertFalse(pods.missing_ingress(None))
+            self.assertEqual(pods.default_ingress_certificate(subprocess.CompletedProcess([], rc, stderr=stderr)), missing)
+        self.assertFalse(pods.default_ingress_certificate(None))
 
     def test_ambiguous_create_recovers_existing_pod(self):
         for error in (pods.TransientError("502"), pods.ConflictError("409")):
