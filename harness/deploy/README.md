@@ -135,6 +135,12 @@ scripts/run.sh examples/simple runs/tapis-example \
 
 For independent problems, start one run per template with a distinct output directory. Pass `--agents 2` to give two leads the same problem. Each lead or helper creates a separate pod and uses one pod for its whole attempt, including every Beam call. A helper receives a copy of all its parent's declared proof files and returns its candidate and notes through the controller. Choose concurrency and per-pod `--cpus` and `--memory-mib` for your TACC allocation. Set `TAPIS_SCRATCH_MIB` to request and limit writable ephemeral storage per pod in MiB. TACC's nodes also need room to pull and unpack the image.
 
+The controller admits up to three pod startups at a time across processes sharing the same user cache directory. Ready pods release their startup slots and keep proving concurrently. Set `TAPIS_MAX_STARTING` consistently across those processes to tune admission for your tenant.
+
+TACC issues a public certificate per pod hostname. After deleting a ready pod the controller caches its name for a fresh pod with new SSH keys and workspace. If an available pod persistently presents the ingress controller’s default certificate, Eureka confirms deletion before trying one other previously certified name within the original startup deadline. The first receipt stays in `tapis-unrouted/`.
+
+For a golf run on an imported project, first pass the original solution to `--verify-only` with the matching local image and packages. This catches toolchain and mathlib incompatibilities before provisioning a pod.
+
 To test multi-file edits and helper isolation on two real TACC pods, set `TAPIS_TOKEN_FILE`, `IMAGE` and `TAPIS_SCRATCH_MIB` as above. The test uses a scripted model on the controller and saves the pod IDs, verification results and cleanup records under `runs/tapis-lifecycle-*`.
 
 ```bash
@@ -144,4 +150,4 @@ HARNESS_PACKAGES="$PWD/lean-packages-dev" HARNESS_IMAGE="$IMAGE" \
   python3 harness/tests/lifecycle.py Lifecycle.test_tapis_multi_file_patch_and_helper_handoff -v
 ```
 
-Each attempt records its pod ID and runtime identity under its host artifact directory in `tapis/`. The controller captures the candidate, deletes the pod, and verifies the captured bytes against a fresh trusted template. Helpers return their candidate to the lead. A completed controller cleanup leaves a `deleted` marker. If the controller is lost, `TAPIS_TIME_TO_STOP` bounds the pod lifetime from startup (default 3600 seconds). Remove an orphan from its recorded attempt directory with `scripts/tapis-pod.py delete /path/to/attempt/tapis`. An expired TACC token must be refreshed for cleanup. A pod timeout or loss of its ephemeral storage can lose edits that have not yet been returned.
+Each attempt records its pod ID and runtime identity under its host artifact directory in `tapis/`. The controller captures the candidate, deletes the pod, and verifies the captured bytes against a fresh trusted template. Helpers return their candidate to the lead. If deletion fails after capture, the controller records `pod_cleanup_deferred`, verifies the private host copy, and retries cleanup before the run exits. A `deleted` marker records confirmed absence. A final cleanup failure makes the run exit with an error and leaves the attempt artifacts available for recovery. If the controller is lost, `TAPIS_TIME_TO_STOP` bounds the pod lifetime from startup (default 3600 seconds). Remove an orphan from its recorded attempt directory with `scripts/tapis-pod.py delete /path/to/attempt/tapis`. An expired TACC token must be refreshed for cleanup. A pod timeout or loss of its ephemeral storage can lose edits that have not yet been returned.

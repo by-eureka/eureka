@@ -486,6 +486,41 @@ class Lifecycle(unittest.TestCase):
             self.assertTrue((pod.parent / 'deleted').is_file())
             self.assertFalse((pod.parent / 'identity').exists())
 
+    @unittest.skipUnless(os.getenv('HARNESS_TAPIS_TEST_BACKEND'), 'requires a live TACC Pods backend')
+    def test_tapis_verifies_captured_proof_after_first_cleanup_fails(self):
+        backend = os.path.abspath(os.environ['HARNESS_TAPIS_TEST_BACKEND'])
+        (ROOT / 'runs').mkdir(exist_ok=True)
+        store = Path(tempfile.mkdtemp(dir=ROOT / 'runs', prefix='tapis-recovery-'))
+        transport = self.dir / 'fail-first-delete'
+        transport.write_text(
+            '#!/usr/bin/env python3\nimport os, sys\nfrom pathlib import Path\n'
+            'marker = Path(sys.argv[2]) / "injected-delete-failure"\n'
+            'if sys.argv[1] == "delete" and not marker.exists():\n'
+            '    marker.touch()\n    sys.exit(1)\n'
+            f'os.execv({backend!r}, [{backend!r}, *sys.argv[1:]])\n'
+        )
+        transport.chmod(0o700)
+        self.args[self.args.index('--store') + 1] = str(store)
+        trace = store / 'trace.jsonl'
+        self.args[self.args.index('--trace') + 1] = str(trace)
+        self.server.respond = lambda _: [
+            call('write_file', {'path': 'Proofs/Solution.lean', 'content': PROOF}),
+            call('submit', {}),
+        ]
+        try:
+            result = self.run_harness('--tapis-backend', str(transport), '--cpus', '1',
+                                      '--memory-mib', '8192', timeout=int(os.getenv('TAPIS_START_TIMEOUT', '900')) + 600)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            attempt, = store.glob('pool-*/attempts/attempt-*')
+            self.assertEqual(json.loads((attempt / 'result.json').read_text())['status'], 'verified')
+            self.assertEqual((attempt / 'candidate.lean').read_text(), PROOF)
+            self.assertIn('pod_cleanup_deferred', [json.loads(l)['event'] for l in trace.read_text().splitlines()])
+            self.assertTrue((attempt / 'tapis/deleted').is_file())
+        finally:
+            for metadata in store.glob('pool-*/attempts/*/tapis/pod.json'):
+                if not (metadata.parent / 'deleted').exists():
+                    subprocess.run([backend, 'delete', str(metadata.parent)], check=True, timeout=400)
+
     def check_multi_file_handoff(self, example, store, timeout):
         template = self.dir / 'template'
         shutil.copytree(ROOT / 'examples' / example, template)
