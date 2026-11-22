@@ -70,6 +70,9 @@ cargo build --locked --manifest-path harness/Cargo.toml
 
 Ordinary runs use `autoprove`. Select another workflow with `--workflow` and describe the task with `--prompt`. The controller supplies the selected guide to both Docker and Tapis attempts. Agents can call `read_guide` for other workflows, specialist guidance, or a reference from the installed Beam skill.
 
+With `--workflow golf --verify-shorter-at-limit`, a lead that uses its last turn can still return a proof. The harness compares the total source lines in its declared files with the starting files, including any seed, and sends a shorter candidate through the ordinary verifier. The transcript records `turn_limit` and `submitted: false` for this path.
+
+
 | Workflow | What you get |
 | --- | --- |
 | `autoprove` | An autonomous proof search across the declared files, followed by independent verification. |

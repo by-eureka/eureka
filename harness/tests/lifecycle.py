@@ -791,6 +791,64 @@ for line in sys.stdin:
         self.assertTrue(probes[0]['success'], probes)
         self.assertFalse(probes[1]['success'], probes)
 
+    def test_golf_can_verify_a_shorter_file_at_the_turn_limit(self):
+        template = self.dir / 'golf-template'
+        shutil.copytree(ROOT / 'examples/core', template, ignore=shutil.ignore_patterns('.lake', '.beam'))
+        target = 'Proofs/Solution.lean'
+        initial = PROOF.replace(':= Nat.', ':= by\n  exact Nat.')
+        (template / target).write_text(initial)
+        seed = self.dir / 'seed.lean'
+        seed.write_text(PROOF)
+        self.args[self.args.index('--template') + 1] = str(template)
+        self.args[self.args.index('--max-turns') + 1] = '1'
+        invalid = PROOF.replace('Nat.add_comm a b', 'sorry')
+        cases = [
+            ('shorter', PROOF, ['--verify-shorter-at-limit'], 'verified'),
+            ('rejected', invalid, ['--verify-shorter-at-limit'], 'rejected'),
+            ('unchanged', initial, ['--verify-shorter-at-limit'], 'not_submitted'),
+            ('default', PROOF, [], 'not_submitted'),
+            ('same-as-seed', PROOF, ['--verify-shorter-at-limit', '--seed', str(seed)], 'not_submitted'),
+        ]
+        for label, text, options, status in cases:
+            with self.subTest(label=label):
+                store = self.dir / label
+                store.mkdir()
+                trace = store / 'trace.jsonl'
+                self.args[self.args.index('--store') + 1] = str(store)
+                self.args[self.args.index('--trace') + 1] = str(trace)
+                self.server.respond = lambda _: [call('write_file', {'path': target, 'content': text})]
+                result = self.run_harness('--workflow', 'golf', *options)
+                self.assertEqual(result.returncode, 0 if status == 'verified' else 2, result.stderr)
+                record, = self.records(store)
+                self.assertEqual(record['termination'], 'turn_limit')
+                self.assertFalse(record['submitted'])
+                self.assertEqual(record['status'], status)
+                events = [json.loads(l) for l in trace.read_text().splitlines()]
+                triggers = [e['trigger'] for e in events if e['event'] == 'verification_start']
+                self.assertEqual(triggers, [] if status == 'not_submitted' else ['shorter_at_turn_limit'])
+
+    def test_golf_at_limit_counts_all_editable_files(self):
+        template = self.dir / 'template'
+        shutil.copytree(ROOT / 'examples/core', template, ignore=shutil.ignore_patterns('.lake', '.beam'))
+        target, helper = 'Proofs/Solution.lean', 'Proofs/Helper.lean'
+        (template / 'proof-files.json').write_text(json.dumps([target, helper]))
+        (template / helper).write_text('def one := 1\n')
+        (template / target).write_text('import Proofs.Helper\n' + PROOF.replace(':= Nat.', ':= by\n  exact Nat.'))
+        self.args[self.args.index('--template') + 1] = str(template)
+        self.args[self.args.index('--max-turns') + 1] = '1'
+        self.server.respond = lambda _: [
+            call('write_file', {'path': target, 'content': 'import Proofs.Helper\n' + PROOF}),
+            call('write_file', {'path': helper, 'content': 'def one := 1\n-- two\n-- three\n'}),
+        ]
+        result = self.run_harness('--workflow', 'golf', '--verify-shorter-at-limit')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        record, = self.records()
+        self.assertEqual(record['termination'], 'turn_limit')
+        self.assertEqual(record['status'], 'not_submitted')
+        candidate = Path(record['candidate'])
+        self.assertEqual((candidate / helper).read_text().splitlines()[-1], '-- three')
+        self.assertEqual((candidate / target).read_text().strip(), ('import Proofs.Helper\n' + PROOF).strip())
+
     def test_saved_proof_can_be_reverified_and_published(self):
         self.server.respond = lambda _: self.fail('verify-only called the model')
         candidate = self.dir/'seed.lean'

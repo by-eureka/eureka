@@ -78,6 +78,9 @@ struct Cli {
     effort: String,
     #[arg(long, default_value_t = 60)]
     max_turns: usize,
+    /// With --workflow golf, verify a shorter saved candidate when the lead exhausts its turns.
+    #[arg(long, conflicts_with = "verify_only")]
+    verify_shorter_at_limit: bool,
     /// Output token cap per model turn (reasoning included).
     #[arg(long, default_value_t = 32_768)]
     max_output_tokens: u32,
@@ -157,6 +160,10 @@ impl Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    anyhow::ensure!(
+        !cli.verify_shorter_at_limit || cli.workflow == Workflow::Golf,
+        "--verify-shorter-at-limit requires --workflow golf"
+    );
     // Catch bad paths, unsupported Lean versions and invalid verification configuration
     // before spending anything on the model.
     let template = std::fs::canonicalize(&cli.template)?;
@@ -308,6 +315,7 @@ async fn main() -> Result<()> {
             instructions
         },
         workflow: cli.workflow,
+        verify_shorter_at_limit: cli.verify_shorter_at_limit,
         guides,
         shell: !cli.no_shell,
         shell_timeout: Duration::from_secs(300),

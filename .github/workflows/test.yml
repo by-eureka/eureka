@@ -91,7 +91,9 @@ jobs:
           DOCKERFILE
           cargo build --locked --manifest-path harness/Cargo.toml
           python3 harness/tests/lifecycle.py -v Lifecycle.test_workflow_guides_and_outcomes \
-            Lifecycle.test_formalization_across_an_import Lifecycle.test_review_detects_source_changes_before_reporting
+            Lifecycle.test_formalization_across_an_import Lifecycle.test_review_detects_source_changes_before_reporting \
+            Lifecycle.test_golf_can_verify_a_shorter_file_at_the_turn_limit \
+            Lifecycle.test_golf_at_limit_counts_all_editable_files
   checks:
     if: always()
     needs: [regression, native-beam, nix]
