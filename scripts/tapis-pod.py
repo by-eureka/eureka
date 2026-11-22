@@ -35,6 +35,10 @@ class ConflictError(RuntimeError):
     pass
 
 
+class MissingIngressRoute(RuntimeError):
+    pass
+
+
 def seconds_left(deadline):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -138,15 +142,18 @@ def submit(template, deadline):
                     return
 
 
-def ssh(state, args):
+def ssh(state, args, *, diagnose_tls=False):
     meta = json.loads((state / "pod.json").read_text())
     host = meta["id"] + ".pods.tacc.tapis.io"
     encoded = base64.b64encode(json.dumps(args).encode()).decode()
+    proxy = "openssl s_client -quiet -verify_return_error -verify_hostname %h -servername %h -connect %h:443"
+    if not diagnose_tls:
+        proxy += " 2>/dev/null"
     cmd = ["ssh", "-F", "/dev/null", "-T", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
            "-o", "IdentityAgent=none", "-o", "ClearAllForwardings=yes", "-o", "StrictHostKeyChecking=yes",
            "-o", "GlobalKnownHostsFile=/dev/null", "-o", "UserKnownHostsFile=" + str(state / "known_hosts"),
            "-o", "ConnectTimeout=12", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
-           "-o", "ProxyCommand=openssl s_client -quiet -verify_return_error -verify_hostname %h -servername %h -connect %h:443 2>/dev/null",
+           "-o", "ProxyCommand=" + proxy,
            "-i", str(state / "identity"), "prover@" + host, encoded]
     return cmd
 
@@ -182,6 +189,24 @@ def delete(state):
 
 
 def create(state, root, image, memory, cpus):
+    deadline = time.monotonic() + int(os.getenv("TAPIS_START_TIMEOUT", "900"))
+    try:
+        create_once(state, root, image, memory, cpus, deadline)
+    except MissingIngressRoute:
+        # A new route needs a new pod ID. Retain the first receipt and never overlap pods.
+        if not (state / "deleted").is_file() or time.monotonic() >= deadline:
+            raise
+        state.rename(state.with_name(state.name + "-unrouted"))
+        create_once(state, root, image, memory, cpus, deadline)
+
+
+def missing_ingress(test):
+    return (test is not None and test.returncode == 255
+            and b"TRAEFIK DEFAULT CERT" in test.stderr
+            and b"self-signed certificate" in test.stderr)
+
+
+def create_once(state, root, image, memory, cpus, deadline):
     if not re.fullmatch(r"debganguly/infinilean:[A-Za-z0-9_.-]+", image) or image.endswith(":latest"):
         raise ValueError("expected a versioned debganguly/infinilean image tag")
     state.mkdir(mode=0o700)
@@ -205,12 +230,13 @@ def create(state, root, image, memory, cpus):
     started = time.monotonic()
     last_status = None
     try:
-        deadline = started + int(os.getenv("TAPIS_START_TIMEOUT", "900"))
+        seconds_left(deadline)
         pending = state / "create-pending"
         pending.touch()
         submit(template, deadline)
         pending.unlink()
         next_attestation = 0
+        missing_since = None
         while time.monotonic() < deadline:
             row = owned(api("GET", path, deadline=deadline), description)
             status = (row or {}).get("status")
@@ -223,6 +249,8 @@ def create(state, root, image, memory, cpus):
                 last_status = progress
             if status in {"STOPPED", "COMPLETE", "ERROR"}:
                 raise RuntimeError(f"{ident} stopped during startup ({status}); see {state}/startup.jsonl")
+            if status != "AVAILABLE":
+                missing_since = None
             if status == "AVAILABLE":
                 # Bootstrap the host key through the authenticated Tapis control plane.
                 if time.monotonic() >= next_attestation:
@@ -235,12 +263,20 @@ def create(state, root, image, memory, cpus):
                             next_attestation = time.monotonic() + 60
                 if (state / "known_hosts").is_file():
                     try:
-                        test = subprocess.run(ssh(state, ["exec", "/opt/lean/bin/lean", "--githash"]),
+                        test = subprocess.run(ssh(state, ["exec", "/opt/lean/bin/lean", "--githash"], diagnose_tls=True),
                                               capture_output=True, timeout=min(25, seconds_left(deadline)))
                     except subprocess.TimeoutExpired:
                         test = None
                     if test is not None and test.returncode == 0:
                         break
+                    if missing_ingress(test):
+                        now = time.monotonic()
+                        if missing_since is None:
+                            missing_since = now
+                        elif now - missing_since >= 90:
+                            raise MissingIngressRoute(f"{ident}: public ingress still presents the default certificate")
+                    else:
+                        missing_since = None
             backoff(deadline, 7)
         else:
             raise RuntimeError(f"{ident} exceeded startup deadline; see {state}/startup.jsonl")

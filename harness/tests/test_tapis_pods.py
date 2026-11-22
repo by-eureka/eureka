@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
@@ -63,6 +64,30 @@ class PodCleanupTests(unittest.TestCase):
 class PodStartupTests(unittest.TestCase):
     template = {"pod_id": "eur0123", "description": "expected owner"}
     deadline = float("inf")
+
+    def test_replaces_one_unrouted_pod_only_after_confirmed_deletion(self):
+        for deleted, calls in ((True, 2), (False, 1)):
+            with self.subTest(deleted=deleted), TemporaryDirectory() as tmp:
+                state = Path(tmp) / "tapis"
+                def unrouted(state, *_args):
+                    state.mkdir()
+                    if deleted:
+                        (state / "deleted").touch()
+                    raise pods.MissingIngressRoute("default certificate")
+                with patch.object(pods, "create_once", side_effect=unrouted) as provision:
+                    with self.assertRaises(pods.MissingIngressRoute):
+                        pods.create(state, Path(tmp), "image", 8192, 1000)
+                self.assertEqual(provision.call_count, calls)
+                self.assertEqual((Path(tmp) / "tapis-unrouted/deleted").exists(), deleted)
+                if deleted:
+                    self.assertEqual(provision.call_args_list[0], provision.call_args_list[1])
+
+    def test_identifies_only_an_unrouted_tls_handshake(self):
+        errors = b"depth=0 CN = TRAEFIK DEFAULT CERT\nverify error:num=18:self-signed certificate"
+        for rc, stderr, missing in ((255, errors, True), (0, errors, False),
+                                    (255, b"Permission denied", False), (255, b"self-signed certificate", False)):
+            self.assertEqual(pods.missing_ingress(subprocess.CompletedProcess([], rc, stderr=stderr)), missing)
+        self.assertFalse(pods.missing_ingress(None))
 
     def test_ambiguous_create_recovers_existing_pod(self):
         for error in (pods.TransientError("502"), pods.ConflictError("409")):
