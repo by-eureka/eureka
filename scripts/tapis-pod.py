@@ -178,6 +178,18 @@ def ssh(state, args, *, diagnose_tls=False):
     return cmd
 
 
+def read_startup_probe(state, argv, timeout):
+    # These reads run after staging and use the pinned SSH host key on every connection.
+    command = ssh(state, ["exec", *argv])
+    deadline = time.monotonic() + timeout
+    for attempt in range(3):
+        result = subprocess.run(command, capture_output=True, timeout=seconds_left(deadline))
+        if result.returncode != 255 or attempt == 2:
+            result.check_returncode()
+            return result.stdout
+        backoff(deadline, 2 ** attempt)
+
+
 def delete(state):
     with (state / "cleanup.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -317,18 +329,15 @@ def create_once(state, root, image, memory, cpus, deadline, ident, *, allow_repl
                            stdout=archive, check=True)
             archive.seek(0)
             subprocess.run(ssh(state, ["stage"]), stdin=archive, check=True, timeout=120)
-        manifest = subprocess.run(ssh(state, ["exec","cat","/project/lake-manifest.json"]),
-                                  capture_output=True, check=True, timeout=20)
-        if json.loads(manifest.stdout).get("packages") != json.loads((root/"lake-manifest.json").read_text()).get("packages"):
+        manifest = read_startup_probe(state, ["cat", "/project/lake-manifest.json"], 20)
+        if json.loads(manifest).get("packages") != json.loads((root/"lake-manifest.json").read_text()).get("packages"):
             raise RuntimeError("prepared pod dependencies differ from trusted manifest")
-        runtime = subprocess.run(ssh(state, ["exec", "/opt/lean/bin/lean-beam", "--version"]),
-                                 capture_output=True, check=True, timeout=25)
-        architecture = subprocess.run(ssh(state, ["exec", "uname", "-m"]),
-                                      capture_output=True, check=True, timeout=25)
+        runtime = read_startup_probe(state, ["/opt/lean/bin/lean-beam", "--version"], 25)
+        architecture = read_startup_probe(state, ["uname", "-m"], 25)
         (state / "runtime.json").write_text(json.dumps({
             "pod_id": ident, "status": status, "image": image, "ready_seconds": round(time.monotonic()-started, 2),
-            "compiler": expected.decode(), "beam": runtime.stdout.decode().strip(),
-            "architecture": architecture.stdout.decode().strip()
+            "compiler": expected.decode(), "beam": runtime.decode().strip(),
+            "architecture": architecture.decode().strip()
         }, indent=2) + "\n")
         print(ident, flush=True)
     except BaseException:

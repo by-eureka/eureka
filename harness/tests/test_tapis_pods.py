@@ -15,6 +15,29 @@ pods = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pods)
 
 
+class StartupProbeTests(unittest.TestCase):
+    def test_manifest_read_recovers_after_disconnect(self):
+        command = ["ssh", "pod", "encoded-read"]
+        replies = [subprocess.CompletedProcess(command, 255),
+                   subprocess.CompletedProcess(command, 0, stdout=b'{"packages": []}')]
+        with patch.object(pods, "ssh", return_value=command) as ssh, \
+             patch.object(pods.subprocess, "run", side_effect=replies) as run, patch.object(pods, "backoff"):
+            self.assertEqual(pods.read_startup_probe("state", ["cat", "/project/lake-manifest.json"], 20),
+                             b'{"packages": []}')
+        ssh.assert_called_once_with("state", ["exec", "cat", "/project/lake-manifest.json"])
+        self.assertEqual([c.args[0] for c in run.call_args_list], [command, command])
+
+    def test_remote_command_errors_and_repeated_disconnects(self):
+        for status, calls in [(1, 1), (255, 3)]:
+            with self.subTest(status=status), patch.object(pods, "ssh", return_value=["ssh"]), \
+                 patch.object(pods.subprocess, "run", return_value=subprocess.CompletedProcess(["ssh"], status)) as run, \
+                 patch.object(pods, "backoff"):
+                with self.assertRaises(subprocess.CalledProcessError) as error:
+                    pods.read_startup_probe("state", ["uname", "-m"], 25)
+                self.assertEqual(error.exception.returncode, status)
+                self.assertEqual(run.call_count, calls)
+
+
 class PodCleanupTests(unittest.TestCase):
     def setUp(self):
         directory = TemporaryDirectory()
